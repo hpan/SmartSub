@@ -14,6 +14,7 @@ import {
   Compass,
   Cpu,
   Edit3,
+  Download,
   Film,
   Github,
   HelpCircle,
@@ -25,6 +26,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  Scissors,
   Search,
   ScrollText,
   Settings,
@@ -96,6 +98,18 @@ const NAV_ITEMS: NavItemDef[] = [
     isActive: (p) => p.includes('subtitleMerge'),
   },
   {
+    href: 'audioCut',
+    labelKey: 'audioCut',
+    icon: Scissors,
+    isActive: (p) => p.includes('audioCut'),
+  },
+  {
+    href: 'download',
+    labelKey: 'videoDownload',
+    icon: Download,
+    isActive: (p) => p.includes('download'),
+  },
+  {
     href: 'engines',
     labelKey: 'enginesAndModels',
     icon: Cpu,
@@ -130,6 +144,8 @@ const PREFETCH_NAMESPACES = [
   'translateControl',
   'resources',
   'subtitleMerge',
+  'audioCut',
+  'download',
   'parameters',
   'modelsControl',
 ];
@@ -149,12 +165,35 @@ function NavItem({
 }) {
   const Icon = item.icon;
   const active = item.isActive(asPath);
+  const router = useRouter();
+
+  // 强制导航：先尝试 router.push，失败则直接设置 location
+  const handleNav = useCallback(
+    (e: React.MouseEvent) => {
+      // 如果已经有 modifier key，允许默认行为（新标签页等）
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      // 清除可能残留的 pointer-events 锁
+      document.body.style.pointerEvents = '';
+      const targetPath = `/${locale}/${item.href}`;
+      router.push(targetPath).catch(() => {
+        window.location.href = targetPath;
+      });
+    },
+    [locale, item.href, router],
+  );
+
   const link = (
-    <Link
-      href={`/${locale}/${item.href}`}
+    <div
+      role="link"
+      tabIndex={0}
       aria-label={label}
+      onClick={handleNav}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') handleNav(e as any);
+      }}
       className={cn(
-        'relative flex h-9 items-center gap-2.5 rounded-lg text-sm font-medium transition-colors',
+        'relative flex h-9 items-center gap-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer',
         expanded ? 'px-2.5' : 'w-9 justify-center mx-auto',
         active
           ? 'bg-primary/10 text-primary before:absolute before:inset-y-1.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-primary'
@@ -163,7 +202,7 @@ function NavItem({
     >
       <Icon className="h-5 w-5 flex-shrink-0" />
       {expanded && <span className="truncate">{label}</span>}
-    </Link>
+    </div>
   );
 
   if (expanded) return link;

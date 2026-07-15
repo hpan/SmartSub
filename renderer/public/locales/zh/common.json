@@ -295,5 +295,7 @@
     "qwen": "Qwen3-ASR",
     "fireRedAsr": "FireRedASR",
     "localCli": "本地命令"
-  }
+  },
+  "videoDownload": "视频下载",
+  "audioCut": "音视频裁切"
 }

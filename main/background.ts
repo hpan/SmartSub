@@ -25,6 +25,8 @@ import { setupWindowCloseBehavior, markQuitting } from './helpers/windowClose';
 import { setupParameterHandlers } from './helpers/ipcParameterHandlers';
 import { setupProofreadHandlers } from './helpers/ipcProofreadHandlers';
 import { setupSubtitleMergeHandlers } from './helpers/ipcSubtitleMergeHandlers';
+import { setupAudioCutHandlers } from './helpers/ipcAudioCutHandlers';
+import { setupVideoDownloadHandlers } from './helpers/videoDownload/ipcVideoDownloadHandlers';
 import { configurationManager } from './service/configurationManager';
 import {
   registerAddonIpcHandlers,
@@ -169,6 +171,8 @@ app.on('before-quit', (event) => {
   setupTaskManager();
   setupAutoUpdater(mainWindow);
   setupSubtitleMergeHandlers(mainWindow);
+  setupAudioCutHandlers(mainWindow);
+  setupVideoDownloadHandlers(mainWindow);
   setMainWindowForAddon(mainWindow);
   registerEngineIpcHandlers();
   setMainWindowForEngine(mainWindow);

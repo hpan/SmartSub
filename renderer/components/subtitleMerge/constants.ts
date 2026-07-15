@@ -22,7 +22,7 @@ export const getPlatformDefaultFont = (): string => {
 export const DEFAULT_STYLE: SubtitleStyle = {
   fontName: 'Arial',
   fontSize: 24,
-  primaryColor: '#FFFFFF',
+  primaryColor: '#F5DE65',
   outlineColor: '#000000',
   backColor: '#000000',
   bold: false,
@@ -56,7 +56,7 @@ export const STYLE_PRESETS: StylePreset[] = [
     style: {
       fontName: 'Arial',
       fontSize: 24,
-      primaryColor: '#FFFFFF',
+      primaryColor: '#F5DE65',
       outlineColor: '#000000',
       backColor: '#000000',
       bold: false,
@@ -100,7 +100,7 @@ export const STYLE_PRESETS: StylePreset[] = [
     style: {
       fontName: 'Roboto',
       fontSize: 22,
-      primaryColor: '#FFFFFF',
+      primaryColor: '#F5DE65',
       outlineColor: '#000000',
       backColor: '#000000',
       bold: false,
@@ -120,15 +120,15 @@ export const STYLE_PRESETS: StylePreset[] = [
     name: '清新简约',
     nameKey: 'presetClean',
     style: {
-      fontName: 'Helvetica Neue',
+      fontName: 'Smiley Sans',
       fontSize: 22,
-      primaryColor: '#FFFFFF',
+      primaryColor: '#F5DE65',
       outlineColor: '#333333',
       backColor: '#000000',
       bold: false,
       italic: false,
       underline: false,
-      borderStyle: 1,
+      borderStyle: 3,
       outline: 1,
       shadow: 0,
       alignment: 2,
@@ -177,6 +177,7 @@ export const FONT_LIST = [
   // 中文字体
   { value: 'Microsoft YaHei', label: '微软雅黑' },
   { value: 'SimHei', label: '黑体' },
+  { value: 'Smiley Sans', label: '得意黑' },
   { value: 'SimSun', label: '宋体' },
   { value: 'KaiTi', label: '楷体' },
   { value: 'PingFang SC', label: '苹方' },

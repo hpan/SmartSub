@@ -266,6 +266,10 @@ const MAC_CJK_FONTS: Array<{ name: string; files: string[] }> = [
     files: ['/System/Library/Fonts/Supplemental/Songti.ttc'],
   },
   {
+    name: 'Smiley Sans',
+    files: ['/Users/vangogh/Library/Fonts/SmileySans-Oblique.ttf'],
+  },
+  {
     name: 'Arial Unicode MS',
     files: ['/System/Library/Fonts/Supplemental/Arial Unicode.ttf'],
   },

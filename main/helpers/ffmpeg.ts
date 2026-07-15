@@ -1,11 +1,31 @@
 import ffmpegStatic from 'ffmpeg-static';
+import path from 'path';
 
 import ffmpeg from 'fluent-ffmpeg';
 import { logMessage } from './storeManager';
 
 const ffmpegPath = ffmpegStatic.replace('app.asar', 'app.asar.unpacked');
 
+// 基于 ffmpeg-static 的路径计算 ffprobe 路径
+const ffprobePath = path.join(
+  path.dirname(ffmpegPath),
+  '..',
+  'ffprobe-static',
+  'bin',
+  process.platform === 'win32'
+    ? 'win32'
+    : process.platform === 'darwin'
+      ? 'darwin'
+      : 'linux',
+  process.arch === 'arm64' ? 'arm64' : 'x64',
+  process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe',
+);
+
+logMessage(`[ffmpeg] ffmpeg path: ${ffmpegPath}`, 'info');
+logMessage(`[ffmpeg] ffprobe path: ${ffprobePath}`, 'info');
+
 ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfprobePath(ffprobePath);
 
 export const extractAudio = (videoPath, audioPath) => {
   return new Promise((resolve, reject) => {

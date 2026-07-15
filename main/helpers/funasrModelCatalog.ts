@@ -63,7 +63,7 @@ export const FUNASR_MODELS: Record<FunasrModelId, FunasrModelSpec> = {
     dirName: 'paraformer-zh',
     kind: 'asr',
     modelType: 'paraformer',
-    repo: 'csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09',
+    repo: 'csukuangfj/sherpa-onnx-paraformer-zh-int8-2025-10-07',
     keepFiles: ['model.int8.onnx', 'tokens.txt'],
     requiredFiles: ['model.int8.onnx', 'tokens.txt'],
   },
