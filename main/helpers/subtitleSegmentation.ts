@@ -4,12 +4,13 @@
  * 上游 fork（buxuku/whisper.cpp）已在原生层提供：
  *   - `token_timestamps:true, max_len:0` → 逐 token 输出 `{ text, t0, t1, p }`（t0/t1 为毫秒）；
  *   - token 时间已做 **segment-aware 映射**：落在语音段内的 token 线性映射回原始时间轴，落在
- *     段间「人工静音」的 token 就近吸附到真实语音边界——于是**段间停顿天然以 token gap 体现**，
- *     不再需要 TS 侧用外部 VAD 把 token 贴回有声区间（旧 `retimeTokensToSpeech` 已删除）。
+ *     段间「人工静音」的 token 通常吸附到真实语音边界；原生层也会免费暴露本次转写使用的 VAD 段。
  *
- * 因此本模块只剩「成句」职责（与边界/停顿还原无关）：
+ * 本模块用同一组 VAD 段修正偶发的跨静音 token，再完成「成句」：
  *   tokensToTriples（毫秒 → [startStr,endStr,text]）
- *     → groupTokenCues（按 token gap / 句末标点 / 软切标点 / 长度上限成句）
+ *     → clampTriplesToSpeechSegments（跨静音 token/run 收回真实语音段）
+ *     → groupTokenCues（按 token gap / 句末标点 / 软切标点 / 长度上限成句；
+ *       硬上限切分回溯到最近可断标点，避免孤立句尾词）
  *     → mergeShortCues（单字碎片并回相邻 cue）
  *     → enforceMinDisplayDuration（最短可读显示时长护栏）。
  *
@@ -48,19 +49,95 @@ const DEFAULTS: Required<GroupTokenCuesOptions> = {
   softMaxDuration: 2.5,
 };
 
-/** 句末标点：命中后在该 token 处收尾（标点保留在当前 cue 末尾）。 */
-const SENTENCE_END = /[。！？!?…]["'”’）)]*$/;
+const MIN_USER_MAX_WIDTH = 8;
+const MAX_USER_MAX_WIDTH = 120;
 
 /**
- * 停顿性（非句末）标点：cue 达软长度后命中即「软切」（标点优先于硬宽度/时长上限，
- * 让长语流在自然停顿处断句而非切在词中）。
- * 刻意排除顿号「、」与冒号「：」——它们常用于号码 / 枚举内部（如「138、0013、800」），
- * 软切会把同一逻辑单元切碎。
+ * 断句标点字符集（唯一事实来源）：groupTokenCues 的句末收尾/软切/硬切回溯与
+ * resplitSubtitleCues 的文本级兜底拆分都从这里派生，避免各处各养一套、行为漂移。
  */
-const SOFT_PUNCT = /[，,；;]["'”’）)]*$/;
+/** 句末标点字符：命中即视为句子边界。 */
+const SENTENCE_END_CHARS = '。！？!?…';
+/**
+ * 停顿性（非句末）标点字符：软切用。刻意排除顿号「、」与冒号「：」——它们常用于
+ * 号码 / 枚举内部（如「138、0013、800」），软切会把同一逻辑单元切碎。
+ */
+const SOFT_PUNCT_CHARS = '，,；;';
+/**
+ * 硬切回溯额外收录的标点字符（顿号、冒号）：软切是「主动提前断句」不收它们；
+ * 硬切回溯发生在「必须切一刀」时——切在任何标点后都优于把句尾词孤立成条
+ * （如「…应用十分|广泛。」），故放宽收录。
+ */
+const HARD_BREAK_EXTRA_CHARS = '、：:';
+/** 允许紧跟在断句标点后的收尾引号 / 括号。 */
+const TRAILING_CLOSERS = `["'”’）)]*`;
+
+/** 句末标点：命中后在该 token 处收尾（标点保留在当前 cue 末尾）。 */
+const SENTENCE_END = new RegExp(`[${SENTENCE_END_CHARS}]${TRAILING_CLOSERS}$`);
+
+/** 停顿性标点：cue 达软长度后命中即「软切」（标点优先于硬宽度/时长上限）。 */
+const SOFT_PUNCT = new RegExp(`[${SOFT_PUNCT_CHARS}]${TRAILING_CLOSERS}$`);
+
+/** 硬切回溯可断标点：句内停顿/枚举标点（含顿号、冒号）。 */
+const HARD_BREAK_PUNCT = new RegExp(
+  `[${SOFT_PUNCT_CHARS}${HARD_BREAK_EXTRA_CHARS}]${TRAILING_CLOSERS}$`,
+);
+
+/** 文本级可断字符（resplitSubtitleCues 兜底拆分用）：空白 + 句末 + 全部可断标点。 */
+const TEXT_BREAK_CHAR = new RegExp(
+  `[\\s${SENTENCE_END_CHARS}${SOFT_PUNCT_CHARS}${HARD_BREAK_EXTRA_CHARS}]`,
+);
 
 /** 纯标点 token：不应因长度/时长上限被切到单独一条（如孤立的「。」）。 */
 const PUNCT_ONLY = /^[\s。．.,，、!！?？…:：;；"'”’()（）【】《》\-—~～]+$/;
+
+/**
+ * 词边界分词器（硬切第二级回退用）：Node / Electron 内置 ICU，含中日韩词典分词
+ * （如「我们|广泛|地|讨论」）。惰性单例；运行时不可用（裁剪版 ICU）→ null，
+ * 调用方降级为原 token / 字符边界行为（行为与引入前一致）。
+ * 结构化类型 + 运行时探测（不依赖 TS lib 的 Intl.Segmenter 声明，兼容较低 target）。
+ */
+interface WordSegmenter {
+  segment(input: string): Iterable<{ index: number }>;
+}
+type SegmenterCtor = new (
+  locale?: string,
+  options?: { granularity?: 'word' | 'grapheme' | 'sentence' },
+) => WordSegmenter;
+
+let wordSegmenter: WordSegmenter | null | undefined;
+function getWordSegmenter(): WordSegmenter | null {
+  if (wordSegmenter === undefined) {
+    try {
+      const ctor =
+        typeof Intl !== 'undefined'
+          ? (Intl as { Segmenter?: SegmenterCtor }).Segmenter
+          : undefined;
+      wordSegmenter =
+        typeof ctor === 'function'
+          ? new ctor(undefined, { granularity: 'word' })
+          : null;
+    } catch {
+      wordSegmenter = null;
+    }
+  }
+  return wordSegmenter;
+}
+
+/**
+ * text 的词边界偏移集合（各分词段起点 + 文本末尾，UTF-16 单位）：
+ * 切分点落在集合内 = 不会把词拆开。Segmenter 不可用 → null（调用方降级）。
+ */
+function wordBoundaryOffsets(text: string): Set<number> | null {
+  const segmenter = getWordSegmenter();
+  if (!segmenter) return null;
+  const bounds = new Set<number>();
+  for (const part of Array.from(segmenter.segment(text))) {
+    bounds.add(part.index);
+  }
+  bounds.add(text.length);
+  return bounds;
+}
 
 /** 把 `HH:MM:SS.mmm` / `MM:SS` / 纯秒（逗号或点皆可）解析为秒；非法返回 null。 */
 function parseTime(time?: string): number | null {
@@ -73,8 +150,8 @@ function parseTime(time?: string): number | null {
   return parts[0];
 }
 
-/** 秒 → `HH:MM:SS,mmm`（SRT 逗号形式）。 */
-function formatTime(seconds: number): string {
+/** 秒 → `HH:MM:SS,mmm`（SRT 逗号形式）。导出供纯逻辑模块（如 cloudAsrShared）复用。 */
+export function formatTime(seconds: number): string {
   const totalMs = Math.max(0, Math.round(seconds * 1000));
   const ms = totalMs % 1000;
   const totalSeconds = Math.floor(totalMs / 1000);
@@ -105,6 +182,53 @@ function visualWidth(text: string): number {
   return width;
 }
 
+function clampInteger(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+/**
+ * 任务级字幕长度设置解析（UI「字幕断句方式」三态，共用 maxSubtitleChars 字段）：
+ *  - 0 / 空 / 非法 → undefined（智能断句：沿用引擎默认，内置/云端词级管线含 40 宽度兜底）；
+ *  - 负数（UI 存 -1）→ 'unlimited'（不限制长度：只按停顿/标点/时长断句，不按宽度硬切）；
+ *  - 正数 → 宽度上限，夹到可读范围。沿用 `visualWidth` 语义：CJK / 全角算 2，其余算 1。
+ */
+function widthLimitFromConfig(
+  config?: Record<string, unknown>,
+): number | 'unlimited' | undefined {
+  const raw = config?.maxSubtitleChars;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const parsed = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(parsed) || parsed === 0) return undefined;
+  if (parsed < 0) return 'unlimited';
+  return clampInteger(parsed, MIN_USER_MAX_WIDTH, MAX_USER_MAX_WIDTH);
+}
+
+export function getSubtitleCueOptions(
+  config?: Record<string, unknown>,
+): GroupTokenCuesOptions | undefined {
+  const limit = widthLimitFromConfig(config);
+  if (!limit) return undefined;
+  if (limit === 'unlimited') {
+    // 不限制长度：关闭宽度硬切（软切/句末标点/停顿断句不变；8s 时长上限保留，
+    // 防无停顿无标点的病态语流整段糊成一条——时长触发的切分同样走标点/词边界回溯）。
+    return { maxWidth: Number.POSITIVE_INFINITY };
+  }
+  return {
+    maxWidth: limit,
+    softMaxWidth: clampInteger(limit * 0.6, 6, limit),
+  };
+}
+
+export function getMergeShortCueOptions(
+  config?: Record<string, unknown>,
+): MergeShortCuesOptions | undefined {
+  const limit = widthLimitFromConfig(config);
+  if (!limit) return undefined;
+  return {
+    maxWidth: limit === 'unlimited' ? Number.POSITIVE_INFINITY : limit,
+  };
+}
+
 /**
  * 「实义字符」数：仅计字母 / 数字 / 表意文字（CJK / 假名 / 谚文），排除标点 / 空白 / 符号。
  * 按 codepoint 区间判定（不用 \p{…}/u 标志，兼容较低 TS target）。
@@ -131,6 +255,29 @@ function contentCharCount(text: string): number {
 }
 
 /**
+ * 词边界回溯（硬切第二级回退，标点缺席时用）：给定当前 cue 各 token 文本与即将并入的
+ * token 文本，返回「切在 texts[i] 之后」的 i（语义同标点回溯）；-1 = 不回溯。
+ *
+ * 仅当在「texts 末尾 | incoming」处直切会把一个跨界词拆开（该处不是词边界）时才回溯，
+ * 且只回溯到与词边界对齐的 token 边界——保证切出来的两条都不含半个词。
+ * Segmenter 不可用 / 找不到对齐边界 → -1（降级为原 token 边界直切，行为同引入前）。
+ */
+function wordAlignedCutIndex(texts: string[], incoming: string): number {
+  const joined = texts.join('');
+  const bounds = wordBoundaryOffsets(joined + incoming);
+  if (!bounds) return -1;
+  if (bounds.has(joined.length)) return -1; // 直切处本就是词边界，无需回溯
+  let offset = 0;
+  const tokenEnds = texts.map((t) => (offset += t.length));
+  for (let i = texts.length - 2; i >= 0; i -= 1) {
+    if (bounds.has(tokenEnds[i]) && joined.slice(0, tokenEnds[i]).trim()) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * 原生逐 token 输出（毫秒）→ TokenTriple（字符串时间轴），喂给 groupTokenCues。
  * 时间非法（缺失 / NaN）的一端输出空串：groupTokenCues 会把该 token 文本并入当前 cue
  * 而不作为切分依据（不丢字、不误切）。
@@ -144,6 +291,134 @@ export function tokensToTriples(tokens: NativeToken[]): TokenTriple[] {
     const endStr = Number.isFinite(t1) ? formatTime(t1 / 1000) : '';
     return [startStr, endStr, tok?.text ?? ''];
   });
+}
+
+/** faster-whisper 的词级输出（start/end 为秒）。 */
+export interface TimedWord {
+  start?: number;
+  end?: number;
+  word?: string;
+}
+
+export function wordsToTriples(words: TimedWord[] | undefined): TokenTriple[] {
+  if (!Array.isArray(words)) return [];
+  return words.map((word): TokenTriple => {
+    const start = Number(word?.start);
+    const end = Number(word?.end);
+    const startStr = Number.isFinite(start) ? formatTime(start) : '';
+    const endStr = Number.isFinite(end) ? formatTime(end) : '';
+    return [startStr, endStr, word?.word ?? ''];
+  });
+}
+
+function splitTextByWidth(text: string, maxWidth: number): string[] {
+  const chunks: string[] = [];
+  // 词边界集（全文一次分词，UTF-16 偏移）：无标点/空白可断时的第二级断点，避免拆词。
+  const wordBounds = wordBoundaryOffsets(text);
+  let buffer = '';
+  // 不变式：buffer 始终等于 text.slice(bufStart, pos)，故 buffer 内偏移 off ↔ 全局 bufStart+off。
+  let bufStart = 0;
+  let pos = 0; // 当前字符 ch 在 text 中的起始偏移
+
+  for (const ch of text) {
+    const next = buffer + ch;
+    if (buffer.trim() && visualWidth(next.trim()) > maxWidth) {
+      const chars = Array.from(buffer);
+      let cutIndex = -1;
+      let offset = 0;
+      for (const cur of chars) {
+        offset += cur.length;
+        if (TEXT_BREAK_CHAR.test(cur) && buffer.slice(0, offset).trim()) {
+          cutIndex = offset;
+        }
+      }
+
+      // 第二级断点：无标点/空白可断，且在「buffer|ch」处直切会拆词（pos 非词边界）
+      // → 回退到 buffer 内最后一个词边界；仍无 → 维持字符直切（兜底，行为同引入前）。
+      if (cutIndex <= 0 && wordBounds && !wordBounds.has(pos)) {
+        for (let off = buffer.length - 1; off > 0; off -= 1) {
+          if (wordBounds.has(bufStart + off) && buffer.slice(0, off).trim()) {
+            cutIndex = off;
+            break;
+          }
+        }
+      }
+
+      if (cutIndex > 0) {
+        const head = buffer.slice(0, cutIndex).trim();
+        if (head) chunks.push(head);
+        const rest = buffer.slice(cutIndex);
+        const restTrimmed = rest.trimStart();
+        bufStart += cutIndex + (rest.length - restTrimmed.length);
+        buffer = restTrimmed + ch;
+      } else {
+        chunks.push(buffer.trim());
+        buffer = ch;
+        bufStart = pos;
+      }
+    } else {
+      buffer = next;
+    }
+    pos += ch.length;
+  }
+
+  const tail = buffer.trim();
+  if (tail) chunks.push(tail);
+  return chunks;
+}
+
+/**
+ * 段级兜底重拆：把超过任务级宽度上限的 cue 按文本可断点拆开（标点/空白优先，
+ * 缺席时回退 Intl.Segmenter 词边界，绝境才按字符直切——不拆词），
+ * 时间按各段文本宽度**比例插值**（拟造时间，非真实词时间）。
+ *
+ * 仅供**没有词级时间戳**的路径使用（FunASR / Qwen / FireRed / 旧加速包段级回退 /
+ * 云端段级、整段降级）。有词级时间戳的路径一律走 `composeWordCues`——
+ * groupTokenCues（含硬切回溯）在真实词时间上断句，质量严格优于比例插值。
+ */
+export function resplitSubtitleCues(
+  cues: TokenTriple[],
+  config?: Record<string, unknown>,
+): TokenTriple[] {
+  const limit = widthLimitFromConfig(config);
+  // 'unlimited'（不限制长度）与未设置一样不重拆：段级引擎的原生断句本就不按宽度硬切。
+  if (!limit || limit === 'unlimited' || cues.length === 0) return cues;
+  const maxWidth = limit;
+
+  const out: TokenTriple[] = [];
+  for (const cue of cues) {
+    const text = cue?.[2] ?? '';
+    if (visualWidth(text.trim()) <= maxWidth) {
+      out.push(cue);
+      continue;
+    }
+
+    const start = parseTime(cue?.[0]);
+    const end = parseTime(cue?.[1]);
+    const parts = splitTextByWidth(text, maxWidth);
+    if (start === null || end === null || end <= start || parts.length <= 1) {
+      out.push(cue);
+      continue;
+    }
+
+    const weights = parts.map((part) => Math.max(1, visualWidth(part)));
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    let cursor = start;
+    for (let i = 0; i < parts.length; i += 1) {
+      const partEnd =
+        i === parts.length - 1
+          ? end
+          : start +
+            ((end - start) *
+              weights
+                .slice(0, i + 1)
+                .reduce((sum, weight) => sum + weight, 0)) /
+              totalWeight;
+      out.push([formatTime(cursor), formatTime(partEnd), parts[i]]);
+      cursor = partEnd;
+    }
+  }
+  return out;
 }
 
 /** whisper 内部 VAD 暴露的语音段（秒，原始时间轴）。 */
@@ -166,51 +441,358 @@ export function vadSegmentsToSpeech(
     .sort((a, b) => a.start - b.start);
 }
 
-/** token 中点所属语音段索引：优先包含该中点的段，否则取距离最近的段。 */
-function segIndexForMid(mid: number, segs: SpeechSegment[]): number {
-  for (let i = 0; i < segs.length; i++) {
-    if (mid >= segs[i].start && mid <= segs[i].end) return i;
-  }
-  let best = 0;
-  let bestDist = Infinity;
-  for (let i = 0; i < segs.length; i++) {
-    const d = mid < segs[i].start ? segs[i].start - mid : mid - segs[i].end;
-    if (d < bestDist) {
-      bestDist = d;
-      best = i;
+const SPEECH_EDGE_EPSILON_SECONDS = 0.08;
+
+interface TokenSpeechContext {
+  prevIndex: number | null;
+  nextIndex: number | null;
+  bridgeTargetIndex: number | null;
+}
+
+interface ParsedSpeechToken {
+  start: number | null;
+  end: number | null;
+  text: string;
+  raw: TokenTriple;
+}
+
+/** token 与重叠最大的语音段交集；无重叠返回 null。 */
+function bestTokenOverlap(
+  start: number,
+  end: number,
+  segments: SpeechSegment[],
+): { index: number; start: number; end: number } | null {
+  let best: { index: number; start: number; end: number } | null = null;
+  let bestDuration = 0;
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    if (segment.start >= end) break;
+    if (segment.end <= start) continue;
+    const overlapStart = Math.max(start, segment.start);
+    const overlapEnd = Math.min(end, segment.end);
+    const duration = overlapEnd - overlapStart;
+    if (duration > bestDuration) {
+      bestDuration = duration;
+      best = { index: i, start: overlapStart, end: overlapEnd };
     }
   }
   return best;
 }
 
+/** 零时长 token 所在语音段；不在任何段内返回 null。 */
+function segmentIndexForPoint(
+  point: number,
+  segments: SpeechSegment[],
+): number | null {
+  const index = segments.findIndex(
+    (segment) => point >= segment.start && point <= segment.end,
+  );
+  return index >= 0 ? index : null;
+}
+
 /**
- * 用 whisper **内部 VAD 段**（addon 已免费暴露，非外部二次 VAD）把逐 token 时间「吸附」回真实语音：
- * 每个 token 按中点归属到最近的语音段，并把它的 [start,end] 夹在该段 [start,end] 内。
+ * 判断 token 是否横跨一整段真实静音。
+ *
+ * whisper.cpp 开 VAD 时，静音后的首 token 可能被扩展成
+ * `[前段末点, 后段起点/段内]`。这种 token 的中点没有语义，按最近边界会把句首误吸回前句；
+ * 只要内容 token 覆盖了完整的 >0.5s VAD gap，就明确归到后段。
+ */
+function bridgeTargetIndex(
+  start: number,
+  end: number,
+  segments: SpeechSegment[],
+): number | null {
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const previous = segments[i];
+    const next = segments[i + 1];
+    if (next.start - previous.end <= DEFAULTS.maxGapSeconds) continue;
+    if (
+      start >= previous.end - SPEECH_EDGE_EPSILON_SECONDS &&
+      start <= previous.end + SPEECH_EDGE_EPSILON_SECONDS &&
+      end >= next.start - SPEECH_EDGE_EPSILON_SECONDS
+    ) {
+      return i + 1;
+    }
+  }
+  return null;
+}
+
+function tokenSpeechContext(
+  start: number,
+  end: number,
+  segments: SpeechSegment[],
+): TokenSpeechContext {
+  const bridge = bridgeTargetIndex(start, end, segments);
+  if (bridge !== null) {
+    return {
+      prevIndex: bridge - 1,
+      nextIndex: bridge,
+      bridgeTargetIndex: bridge,
+    };
+  }
+
+  let prevIndex: number | null = null;
+  for (let i = 0; i < segments.length; i += 1) {
+    if (segments[i].end <= start + SPEECH_EDGE_EPSILON_SECONDS) {
+      prevIndex = i;
+    }
+  }
+  const nextIndex = segments.findIndex(
+    (segment) => segment.start >= end - SPEECH_EDGE_EPSILON_SECONDS,
+  );
+  return {
+    prevIndex,
+    nextIndex: nextIndex >= 0 ? nextIndex : null,
+    bridgeTargetIndex: null,
+  };
+}
+
+function sameTokenSpeechContext(
+  left: TokenSpeechContext,
+  right: TokenSpeechContext,
+): boolean {
+  return (
+    left.prevIndex === right.prevIndex && left.nextIndex === right.nextIndex
+  );
+}
+
+/**
+ * 把同一静音区里的连续内容 token 收进目标语音段。
+ * - 前向 run：去掉线性摊时产生的假空隙，紧凑排列；目标段装不下时等比压缩。
+ * - 后向 run：保持原有兼容语义，全部收敛到前段末点，交给 group 与前文合并。
+ */
+function packFloatingRun(
+  info: ParsedSpeechToken[],
+  from: number,
+  to: number,
+  window: SpeechSegment,
+  forward: boolean,
+  segments: SpeechSegment[],
+): TokenTriple[] {
+  if (!forward) {
+    return info
+      .slice(from, to)
+      .map((token) => [
+        formatTime(window.end),
+        formatTime(window.end),
+        token.text,
+      ]);
+  }
+
+  const durations = info.slice(from, to).map((token) => {
+    const start = token.start as number;
+    const end = token.end as number;
+    const rawDuration = Math.max(0, end - start);
+    if (bridgeTargetIndex(start, end, segments) === null) {
+      return Math.max(0.08, rawDuration);
+    }
+    let crossedSilence = 0;
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const gapStart = segments[i].end;
+      const gapEnd = segments[i + 1].start;
+      if (gapEnd <= start || gapStart >= end) continue;
+      crossedSilence += Math.min(end, gapEnd) - Math.max(start, gapStart);
+    }
+    // 横跨完整静音的首 token 只保留去掉静音后的有效时长；完全贴边时留 80ms，
+    // 避免它单独落成零时长字幕，同时不占满整个后段。
+    return Math.max(0.08, rawDuration - crossedSilence);
+  });
+  const totalDuration = durations.reduce((sum, duration) => sum + duration, 0);
+  const targetDuration = Math.max(0, window.end - window.start);
+  const scale =
+    totalDuration > targetDuration && totalDuration > 0
+      ? targetDuration / totalDuration
+      : 1;
+  const packedDuration = totalDuration * scale;
+  let cursor = forward ? window.start : window.end - packedDuration;
+
+  return info.slice(from, to).map((token, index): TokenTriple => {
+    const start = cursor;
+    cursor += durations[index] * scale;
+    return [formatTime(start), formatTime(cursor), token.text];
+  });
+}
+
+/**
+ * 用 whisper **内部 VAD 段**（addon 已免费暴露，非外部二次 VAD）把逐 token 时间收进真实语音：
+ * - 已与语音段重叠的 token 收敛到最大重叠段；
+ * - 横跨完整静音的桥接 token 明确归到后段；
+ * - 同一静音区里的连续内容 token 作为一个 run 整体判向并紧凑放入同一语音段。
  *
  * 解决的问题：whisper 的 token 级时间戳是「按 voice_length 把整段时长摊给 token」的启发式，
  * 当某个转写 segment 跨越了一段人工静音（VAD 删除的静音）时，medium 这类模型会把 token 时间
- * **连续地摊过静音**（实测 medium 在 21.5→25.1s 静音处最大 token 间隔仅 600ms，字幕直接糊穿静音；
- * 而 tiny 恰好摊出 3.67s 间隔才躲过）。夹紧后：静音前 token≤段尾、静音后 token≥段首，groupTokenCues
- * 依据由此产生的真实间隔自然断句，字幕不再压在静音上——且与模型无关（medium/tiny 一致）。
+ * **连续地摊过静音**。逐 token 按中点选最近段会从静音中间劈开同一句，形成 #372 的
+ * 「上一句后半 + 下一句前半」滚动错位；run 级归属恢复真实间隔，也不会把句尾拖尾字一律前移。
  */
 export function clampTriplesToSpeechSegments(
   triples: TokenTriple[],
   segments: SpeechSegment[],
 ): TokenTriple[] {
   if (!Array.isArray(triples) || !segments?.length) return triples;
-  const segs = [...segments].sort((a, b) => a.start - b.start);
-  return triples.map((triple): TokenTriple => {
-    const st = parseTime(triple?.[0]);
-    const en = parseTime(triple?.[1]);
-    const text = triple?.[2] ?? '';
-    if (st === null || en === null)
-      return [triple?.[0] ?? '', triple?.[1] ?? '', text];
-    const mid = (st + en) / 2;
-    const seg = segs[segIndexForMid(mid, segs)];
-    const cs = Math.min(Math.max(st, seg.start), seg.end);
-    const ce = Math.max(cs, Math.min(Math.max(en, seg.start), seg.end));
-    return [formatTime(cs), formatTime(ce), text];
-  });
+  const segs = [...segments]
+    .filter(
+      (segment) =>
+        Number.isFinite(segment.start) &&
+        Number.isFinite(segment.end) &&
+        segment.end > segment.start,
+    )
+    .sort((a, b) => a.start - b.start);
+  if (segs.length === 0) return triples;
+
+  const info: ParsedSpeechToken[] = triples.map((triple) => ({
+    start: parseTime(triple?.[0]),
+    end: parseTime(triple?.[1]),
+    text: triple?.[2] ?? '',
+    raw: triple,
+  }));
+  const out: TokenTriple[] = triples.map((triple) => triple);
+
+  const contextAt = (index: number): TokenSpeechContext | null => {
+    const token = info[index];
+    if (token.start === null || token.end === null) return null;
+    return tokenSpeechContext(token.start, token.end, segs);
+  };
+  const isFloatingContent = (index: number): boolean => {
+    const token = info[index];
+    if (token.start === null || token.end === null) return false;
+    const trimmed = token.text.trim();
+    if (!trimmed || PUNCT_ONLY.test(trimmed)) return false;
+    const context = contextAt(index);
+    if (context?.bridgeTargetIndex !== null) return true;
+    if (token.end > token.start) {
+      return bestTokenOverlap(token.start, token.end, segs) === null;
+    }
+    return segmentIndexForPoint(token.start, segs) === null;
+  };
+
+  // 记录每个语音段按 token 顺序已经占用的末点；同一段可能接收多个被空白/独立标点
+  // 隔开的 forward run，也可能已有锚定 token，后续 run 不能再从段首开始与它们重叠。
+  const outputCursorBySegment = new Map<number, number>();
+  const recordOutputCursor = (segmentIndex: number, end: number) => {
+    outputCursorBySegment.set(
+      segmentIndex,
+      Math.max(outputCursorBySegment.get(segmentIndex) ?? 0, end),
+    );
+  };
+  let index = 0;
+  while (index < info.length) {
+    const token = info[index];
+    if (token.start === null || token.end === null) {
+      out[index] = token.raw;
+      index += 1;
+      continue;
+    }
+
+    if (!isFloatingContent(index)) {
+      if (token.end > token.start) {
+        const overlap = bestTokenOverlap(token.start, token.end, segs);
+        out[index] = overlap
+          ? [formatTime(overlap.start), formatTime(overlap.end), token.text]
+          : token.raw;
+        if (overlap) recordOutputCursor(overlap.index, overlap.end);
+      } else {
+        out[index] = token.raw;
+        const pointSegment = segmentIndexForPoint(token.start, segs);
+        if (pointSegment !== null) {
+          recordOutputCursor(pointSegment, token.start);
+        }
+      }
+      index += 1;
+      continue;
+    }
+
+    const context = contextAt(index) as TokenSpeechContext;
+    let runEnd = index + 1;
+    while (
+      runEnd < info.length &&
+      !SENTENCE_END.test(info[runEnd - 1].text.trim()) &&
+      isFloatingContent(runEnd) &&
+      sameTokenSpeechContext(context, contextAt(runEnd) as TokenSpeechContext)
+    ) {
+      runEnd += 1;
+    }
+
+    const first = info[index];
+    const last = info[runEnd - 1];
+    const previous =
+      context.prevIndex !== null ? segs[context.prevIndex] : null;
+    const next = context.nextIndex !== null ? segs[context.nextIndex] : null;
+    const gapToPrevious = previous
+      ? Math.max(0, first.start! - previous.end)
+      : Number.POSITIVE_INFINITY;
+    const gapToNext = next
+      ? Math.max(0, next.start - last.end!)
+      : Number.POSITIVE_INFINITY;
+    const forward =
+      context.bridgeTargetIndex !== null || gapToNext <= gapToPrevious;
+    const target = forward ? next : previous;
+    const targetIndex = forward ? context.nextIndex : context.prevIndex;
+
+    if (target) {
+      let window = target;
+      if (forward) {
+        let windowStart = Math.max(
+          target.start,
+          targetIndex !== null
+            ? (outputCursorBySegment.get(targetIndex) ?? target.start)
+            : target.start,
+        );
+        const previousOutputEnd =
+          index > 0 ? parseTime(out[index - 1]?.[1]) : null;
+        if (previousOutputEnd !== null && previousOutputEnd > target.start) {
+          windowStart = Math.min(
+            Math.max(windowStart, previousOutputEnd),
+            target.end,
+          );
+        }
+
+        // 不占用后续已锚定 token 的时间，否则前移 run 可能越过后续 token，
+        // 让 group 产出倒序或互相重叠的 cue。
+        let windowEnd = target.end;
+        for (let i = runEnd; i < info.length; i += 1) {
+          const follower = info[i];
+          if (follower.start === null || follower.end === null) continue;
+          if (follower.start >= target.end) break;
+          if (isFloatingContent(i)) continue;
+          const overlapStart = Math.max(follower.start, target.start);
+          const overlapEnd = Math.min(follower.end, target.end);
+          if (
+            overlapEnd > overlapStart ||
+            (follower.start === follower.end &&
+              follower.start >= target.start &&
+              follower.start <= target.end)
+          ) {
+            windowEnd = Math.max(
+              windowStart,
+              Math.min(windowEnd, overlapStart),
+            );
+            break;
+          }
+        }
+        window = { start: windowStart, end: windowEnd };
+      }
+      const packed = packFloatingRun(
+        info,
+        index,
+        runEnd,
+        window,
+        forward,
+        segs,
+      );
+      for (let i = index; i < runEnd; i += 1) {
+        out[i] = packed[i - index];
+      }
+      if (forward && targetIndex !== null && packed.length > 0) {
+        const packedEnd = parseTime(packed[packed.length - 1][1]);
+        if (packedEnd !== null) {
+          recordOutputCursor(targetIndex, packedEnd);
+        }
+      }
+    }
+    index = runEnd;
+  }
+
+  return out;
 }
 
 export interface ClampDominantOptions {
@@ -319,6 +901,10 @@ export function dropCuesInDeepSilence(
  * 2) 当前 cue 命中句末标点（句子边界）；
  * 3) cue 达软长度（softMaxWidth / softMaxDuration）后命中停顿性标点（，,；;）→ 标点优先软切（§6.2）；
  * 4) 累计时长 / 宽度超硬上限（maxDuration / maxWidth）兜底，避免连续无停顿语流挤成一条。
+ *    硬切**优先回溯**到 cue 内最后一个可断标点（，,；;、：:）后分割，余部（真实词级时间）
+ *    作新 cue 开头，避免把句尾词孤切成条（如「…应用十分|广泛。」）；若余部并入本 token 后
+ *    仍超限则余部单独成条（保证任何 cue 不超宽）；句内无可断标点时**再回退词边界**
+ *    （Intl.Segmenter，避免把「不错」这类词从 token 缝里拆开），仍无 → token 边界直切。
  *
  * 另：开新 cue 时若首 token 为纯标点，则贴回上一条 cue 末尾（前导标点归属 §6.2，
  * 避免出现以「，」开头的字幕条；不改上一条时间，仅补字符）。
@@ -331,10 +917,29 @@ export function groupTokenCues(
   const opts = { ...DEFAULTS, ...options };
   const cues: TokenTriple[] = [];
 
+  // 当前 cue 的 token 缓冲：保留逐 token 时间，供硬切回溯在标点处重新分割。
+  interface BufTok {
+    start: number;
+    end: number;
+    text: string;
+  }
+  let buf: BufTok[] = [];
   let curStart = 0;
   let curEnd = 0;
   let curText = '';
   let hasCur = false;
+
+  const setCur = (toks: BufTok[]) => {
+    buf = toks;
+    hasCur = toks.length > 0;
+    if (!hasCur) {
+      curText = '';
+      return;
+    }
+    curStart = toks[0].start;
+    curEnd = toks.reduce((m, t) => Math.max(m, t.end), toks[0].end);
+    curText = toks.map((t) => t.text).join('');
+  };
 
   const flush = () => {
     if (!hasCur) return;
@@ -342,8 +947,7 @@ export function groupTokenCues(
     if (text) {
       cues.push([formatTime(curStart), formatTime(curEnd), text]);
     }
-    hasCur = false;
-    curText = '';
+    setCur([]);
   };
 
   for (const token of tokens) {
@@ -353,7 +957,10 @@ export function groupTokenCues(
 
     // 时间戳缺失的 token：并入当前 cue 文本（不作为切分依据），避免丢字。
     if (start === null || end === null) {
-      if (hasCur) curText += text;
+      if (hasCur) {
+        curText += text;
+        if (buf.length) buf[buf.length - 1].text += text;
+      }
       continue;
     }
 
@@ -364,12 +971,47 @@ export function groupTokenCues(
       // 纯标点 token 不触发长度/时长切分（避免孤立的「。」「，」单独成条），
       // 但真实停顿（gap）仍然切分。
       const punctOnly = PUNCT_ONLY.test(text.trim());
-      if (
-        gap > opts.maxGapSeconds ||
-        (!punctOnly &&
-          (nextDuration > opts.maxDurationSeconds || nextWidth > opts.maxWidth))
-      ) {
+      if (gap > opts.maxGapSeconds) {
         flush();
+      } else if (
+        !punctOnly &&
+        (nextDuration > opts.maxDurationSeconds || nextWidth > opts.maxWidth)
+      ) {
+        // 硬上限触发：回溯到 cue 内最后一个可断标点后切分（避免孤立句尾词）。
+        // 余部（标点后的 token）留作新 cue 开头；若余部加上本 token 仍超限，
+        // 则余部也单独成条（保证任何 cue 不超宽；单字余部由 mergeShortCues 回收）。
+        let cut = -1;
+        for (let i = buf.length - 2; i >= 0; i -= 1) {
+          if (HARD_BREAK_PUNCT.test(buf[i].text.trim())) {
+            cut = i;
+            break;
+          }
+        }
+        // 第二级回退：cue 内无可断标点（无标点长语流常见于云端/裸 whisper 输出）时，
+        // 若直切会把跨界词拆开（中文 token 常为单字，如「不|错」），改在最近的
+        // 「词边界对齐的 token 边界」处切，保证不拆词；仍找不到则维持 token 边界直切。
+        if (cut < 0) {
+          cut = wordAlignedCutIndex(
+            buf.map((t) => t.text),
+            text,
+          );
+        }
+        if (cut >= 0) {
+          const rest = buf.slice(cut + 1);
+          setCur(buf.slice(0, cut + 1));
+          flush();
+          setCur(rest);
+          const restWidth = visualWidth(curText) + visualWidth(text);
+          const restDuration = Math.max(end, curEnd) - curStart;
+          if (
+            restWidth > opts.maxWidth ||
+            restDuration > opts.maxDurationSeconds
+          ) {
+            flush();
+          }
+        } else {
+          flush();
+        }
       }
     }
 
@@ -381,11 +1023,9 @@ export function groupTokenCues(
         prev[2] += text.trim();
         continue;
       }
-      curStart = start;
-      curEnd = end;
-      curText = text;
-      hasCur = true;
+      setCur([{ start, end, text }]);
     } else {
+      buf.push({ start, end, text });
       curText += text;
       curEnd = Math.max(curEnd, end);
     }
@@ -542,4 +1182,26 @@ export function enforceMinDisplayDuration(
     if (newEnd <= e) return normalized; // 下一条太近，无空隙可延 → 原样
     return [formatTime(s), formatTime(newEnd), text];
   });
+}
+
+/**
+ * 词级成句统一出口：groupTokenCues → mergeShortCues → enforceMinDisplayDuration，
+ * 并接入任务级 `maxSubtitleChars`（0 / 缺省 = 引擎默认断句；-1 = 不限制长度，
+ * 仅按停顿 / 标点 / 时长断句，不按宽度硬切）。
+ *
+ * 词级路径**不做**文本级 resplit 兜底：宽度上限已由 groupTokenCues（含硬切回溯到
+ * 最近可断标点）在真实词时间上保证，叠一层比例插值只会劣化时间轴。
+ * faster-whisper / 云端听写等「纯词级」引擎直接用本出口；内置引擎因需在成句前后
+ * 插入 VAD / 能量收敛步骤，保持显式装配，但同样不再补 resplit。
+ */
+export function composeWordCues(
+  triples: TokenTriple[],
+  config?: Record<string, unknown>,
+): TokenTriple[] {
+  return enforceMinDisplayDuration(
+    mergeShortCues(
+      groupTokenCues(triples, getSubtitleCueOptions(config)),
+      getMergeShortCueOptions(config),
+    ),
+  );
 }

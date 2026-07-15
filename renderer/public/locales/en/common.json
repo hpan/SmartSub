@@ -294,7 +294,8 @@
     "funasr": "FunASR",
     "qwen": "Qwen3-ASR",
     "fireRedAsr": "FireRedASR",
-    "localCli": "Local command"
+    "localCli": "Local command",
+    "cloud": "Cloud ASR"
   },
   "videoDownload": "Video Download",
   "audioCut": "Audio/Video Cut"

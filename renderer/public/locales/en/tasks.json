@@ -75,6 +75,15 @@
     "off": "Off: engine defaults (keeps cross-segment coherence); long videos or silence may produce repeated or hallucinated lines.",
     "hint": "Turn on when subtitles loop or repeat heavily. Global setting; applies to both faster-whisper and whisper.cpp."
   },
+  "subtitleLength": {
+    "label": "Subtitle line breaking",
+    "modeSmart": "Smart segmentation (recommended)",
+    "modeUnlimited": "No length limit",
+    "modeCustom": "Custom length limit",
+    "hintSmart": "The engine splits lines at pauses and punctuation, keeping each subtitle at a readable length.",
+    "hintUnlimited": "Split only at speech pauses and punctuation. Lines are never force-split by length and may run long.",
+    "hintCustom": "Lines over the limit are split at punctuation or word boundaries, never inside a word. CJK characters count as 2 (40 is about 20 Chinese characters); 30-50 suggested for Chinese, 40-60 for English."
+  },
   "chinesePunctuation": {
     "label": "Strip Chinese punctuation",
     "hint": "Replace Chinese punctuation (，。、？！ etc.) in Chinese subtitles with spaces and trim trailing spaces for cleaner subtitles. Applies to the source when the source language is Chinese, and to the translation when the target is Chinese."
