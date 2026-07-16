@@ -101,6 +101,7 @@ export function saveRenameConfig(config: RenameConfig): void {
 /**
  * 解析文件名中的日期信息
  * 支持格式:
+ *   5月4日 大摩宏观策略会：内卷与创新之辩          (X月Y日 开头)
  *   6.17完整版大摩闭门会 ｜标题 [BVxxx].mp3       (M.D 开头)
  *   【完整版】大摩闭门会：标题260622全网最快        (YYMMDD 结尾)
  */
@@ -108,16 +109,15 @@ function parseDateFromFilename(filename: string): {
   date: string;
   weekday: number;
 } | null {
-  // 去除 [BVxxx] 部分
   const clean = filename.replace(/\s*\[BV[a-zA-Z0-9]+\]\s*/g, '').trim();
 
   let dt: Date | null = null;
 
-  // 格式1: 开头 M.D 或 MM.DD
-  const m1 = clean.match(/^(\d{1,2})[.．](\d{1,2})/);
-  if (m1) {
-    const month = parseInt(m1[1], 10);
-    const day = parseInt(m1[2], 10);
+  // 格式1: 开头 X月Y日（中文日期）
+  const mZh = clean.match(/^(\d{1,2})月(\d{1,2})日/);
+  if (mZh) {
+    const month = parseInt(mZh[1], 10);
+    const day = parseInt(mZh[2], 10);
     const year = new Date().getFullYear();
     const candidate = new Date(year, month - 1, day);
     if (candidate.getMonth() === month - 1 && candidate.getDate() === day) {
@@ -125,7 +125,21 @@ function parseDateFromFilename(filename: string): {
     }
   }
 
-  // 格式2: 结尾 YYMMDD（如 260622）
+  // 格式2: 开头 M.D 或 MM.DD
+  if (!dt) {
+    const m1 = clean.match(/^(\d{1,2})[.．](\d{1,2})/);
+    if (m1) {
+      const month = parseInt(m1[1], 10);
+      const day = parseInt(m1[2], 10);
+      const year = new Date().getFullYear();
+      const candidate = new Date(year, month - 1, day);
+      if (candidate.getMonth() === month - 1 && candidate.getDate() === day) {
+        dt = candidate;
+      }
+    }
+  }
+
+  // 格式3: 结尾 YYMMDD（如 260622）
   if (!dt) {
     const m2 = clean.match(
       /(\d{2})(\d{2})(\d{2})(?:全网|推荐|独家|搬运|B站|$)/,
@@ -249,6 +263,71 @@ function classifySource(
 }
 
 /**
+ * 从原始文件名中提取标题（去掉日期、来源名、节目名等前缀）
+ *
+ * 例: "5月4日 大摩宏观策略会：内卷与创新之辩" → "内卷与创新之辩"
+ *     "6.17完整版大摩闭门会 ｜药明康德260622" → "药明康德"
+ */
+function extractTopicFromFilename(
+  filename: string,
+  sourceName: string,
+  programs: Record<string, ProgramConfig>,
+): string {
+  let text = filename.replace(/\s*\[BV[a-zA-Z0-9]+\]\s*/g, '').trim();
+
+  // 去掉 【xxx】 标记
+  text = text.replace(/【[^】]*】\s*/g, '').trim();
+
+  // 去掉中文日期前缀: "5月4日 "、"12月3日"
+  text = text.replace(/^\d{1,2}月\d{1,2}日\s*/, '');
+  // 去掉点号日期前缀: "6.17"、"12.3"
+  text = text.replace(/^\d{1,2}[.．]\d{1,2}/, '');
+
+  // 按 ｜ 或 | 分割，取最后一段（标题在分隔符后面）
+  const parts = text.split(/[｜|]/);
+  if (parts.length > 1) {
+    text = parts[parts.length - 1].trim();
+  }
+
+  // 去掉结尾的 YYMMDD + 推广文字
+  text = text.replace(/\d{6}.*$/, '').trim();
+
+  // 核心：去掉 "来源名+节目名：" 前缀
+  // 匹配模式：（来源关键词）（节目名）：（标题）
+  // 例: "大摩宏观策略会：内卷与创新之辩" → "内卷与创新之辩"
+  // 例: "华创宏观张瑜：让加息的子弹飞一会儿" → "让加息的子弹飞一会儿"
+  if (sourceName !== '其他' && programs[sourceName]) {
+    const kwPattern = programs[sourceName].keywords
+      .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    // 去掉 "来源名 + 任意文字 + ：" 的前缀
+    text = text.replace(
+      new RegExp('^(?:' + kwPattern + ')[^：:]*[：:]\s*', ''),
+      '',
+    );
+    // 也去掉纯来源名前缀（如果没有冒号分隔）
+    text = text.replace(new RegExp('^(?:' + kwPattern + ')\s*', ''), '');
+  }
+
+  // 清理推广文字
+  text = text.replace(
+    /\s*[（(【[][^）)\]】]*(?:B站|首发|推荐|独家|转载|搬运|全网|星推荐)[^）)\]】]*[）)】\]]/g,
+    '',
+  );
+  text = text.replace(/(?:B站|全网)首发/g, '');
+  text = text.replace(/(?:推荐程度|[0-9]+星推荐)/g, '');
+
+  // 去掉开头或结尾的 6 位日期数字
+  text = text.replace(/^\d{6}\s*/, '');
+  text = text.replace(/\s*\d{6}$/, '');
+
+  // 清理多余空格
+  text = text.replace(/\s+/g, ' ').trim();
+
+  return text;
+}
+
+/**
  * 生成规范的文件名
  * 规则: {日期}-{栏目名}：{标题}.{ext}
  */
@@ -260,7 +339,6 @@ function generateFilename(
   originalFilename: string,
   programs: Record<string, ProgramConfig>,
 ): string {
-  // 尝试从原始文件名解析日期
   const parsed = parseDateFromFilename(originalFilename);
 
   let dateStr: string;
@@ -269,34 +347,8 @@ function generateFilename(
 
   if (parsed) {
     dateStr = parsed.date;
-    topic = parsed.date
-      ? originalFilename.replace(/\s*\[BV[a-zA-Z0-9]+\]\s*/g, '').trim()
-      : title;
     weekday = parsed.weekday;
-
-    // 从原始文件名中提取标题部分
-    const clean = originalFilename
-      .replace(/\s*\[BV[a-zA-Z0-9]+\]\s*/g, '')
-      .trim();
-
-    // 去掉开头的 【xxx】 标记
-    let extracted = clean.replace(/【[^】]*】\s*/g, '').trim();
-    // 去掉日期前缀（格式1）
-    const m1 = extracted.match(/^\d{1,2}[.．]\d{1,2}/);
-    if (m1) {
-      extracted = extracted.substring(m1[0].length);
-    }
-    // 按 ｜ 或 | 分割，取最后一段
-    const parts = extracted.split(/[｜|]/);
-    if (parts.length > 1) {
-      extracted = parts[parts.length - 1].trim();
-    }
-    // 去掉结尾的 YYMMDD + 推广文字
-    extracted = extracted.replace(/\d{6}.*$/, '').trim();
-    // 去掉开头的栏目名（如 "大摩闭门会："）
-    extracted = extracted.replace(/^[^：:]*[：:]\s*/, '').trim();
-
-    topic = extracted;
+    topic = extractTopicFromFilename(originalFilename, sourceName, programs);
   } else if (uploadDate && uploadDate.length >= 8) {
     dateStr = uploadDate.substring(0, 8);
     topic = title;
