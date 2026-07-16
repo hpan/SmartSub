@@ -33,6 +33,11 @@ import {
   downloadXyzAudio,
   type XyzEpisode,
 } from './xyzdlDownloader';
+import {
+  renameAfterDownload,
+  readRenameConfig,
+  saveRenameConfig,
+} from './renameAfterDownload';
 
 /** 下载配置默认值 */
 const DEFAULT_CONFIG: DownloadConfig = {
@@ -211,6 +216,7 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
             thumbnail: episode.coverUrl,
             duration: episode.duration,
             uploader: episode.podcastAuthor,
+            uploadDate: null,
             originalUrl: url,
             platform: 'xiaoyuzhou',
             formats: [
@@ -272,6 +278,7 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
               thumbnail: episode.coverUrl,
               duration: episode.duration,
               uploader: episode.podcastAuthor,
+              uploadDate: null,
               originalUrl: url,
               platform: 'xiaoyuzhou',
               formats: [
@@ -380,14 +387,23 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
             },
           );
 
-          task.outputPath = outputPath;
+          // 重命名
+          const renameResult = renameAfterDownload(
+            outputPath,
+            episode.title,
+            null,
+            task.videoInfo.originalUrl,
+          );
+          const finalPath = renameResult.newPath;
+
+          task.outputPath = finalPath;
           task.progress = 100;
-          updateTaskStatus(taskId, 'completed', { outputPath });
+          updateTaskStatus(taskId, 'completed', { outputPath: finalPath });
           sendToRenderer(DOWNLOAD_IPC_CHANNELS.TASK_COMPLETE, {
             taskId,
-            outputPath,
+            outputPath: finalPath,
           });
-          return { success: true, outputPath };
+          return { success: true, outputPath: finalPath };
         }
 
         const ytdlpPath = await ensureYtdlp(mainWindow);
@@ -413,12 +429,21 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
             });
           },
           (outputPath) => {
-            task.outputPath = outputPath;
+            // 重命名
+            const renameResult = renameAfterDownload(
+              outputPath,
+              task.videoInfo.title,
+              task.videoInfo.uploadDate,
+              task.videoInfo.originalUrl,
+            );
+            const finalPath = renameResult.newPath;
+
+            task.outputPath = finalPath;
             task.progress = 100;
-            updateTaskStatus(taskId, 'completed', { outputPath });
+            updateTaskStatus(taskId, 'completed', { outputPath: finalPath });
             sendToRenderer(DOWNLOAD_IPC_CHANNELS.TASK_COMPLETE, {
               taskId,
-              outputPath,
+              outputPath: finalPath,
             });
           },
           (error) => {
@@ -503,6 +528,20 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
     if (result.canceled || !result.filePaths[0]) return null;
     return result.filePaths[0];
   });
+
+  // ==================== 重命名规则 ====================
+
+  ipcMain.handle(DOWNLOAD_IPC_CHANNELS.GET_RENAME_CONFIG, async () => {
+    return readRenameConfig();
+  });
+
+  ipcMain.handle(
+    DOWNLOAD_IPC_CHANNELS.SAVE_RENAME_CONFIG,
+    async (_event, config) => {
+      saveRenameConfig(config);
+      return readRenameConfig();
+    },
+  );
 }
 
 // 下载封面图

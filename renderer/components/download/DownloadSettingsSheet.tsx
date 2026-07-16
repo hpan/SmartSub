@@ -39,6 +39,18 @@ import {
   type CookieMode,
   type YtdlpStatus,
 } from '../../../types/videoDownload';
+
+interface RenameConfig {
+  enabled: boolean;
+  programs: Record<
+    string,
+    {
+      keywords: string[];
+      nameFormat?: string;
+      weekdayNames?: Record<number, string>;
+    }
+  >;
+}
 import { toast } from 'sonner';
 
 interface Props {
@@ -89,6 +101,27 @@ export function DownloadSettingsSheet({
   onOpenChange,
 }: Props) {
   const { t } = useTranslation('download');
+  const [renameConfig, setRenameConfig] = useState<RenameConfig | null>(null);
+
+  React.useEffect(() => {
+    window.ipc
+      .invoke(DOWNLOAD_IPC_CHANNELS.GET_RENAME_CONFIG)
+      .then((c: RenameConfig) => {
+        setRenameConfig(c);
+      })
+      .catch(() => {});
+  }, []);
+
+  const saveRenameEnabled = async (enabled: boolean) => {
+    if (!renameConfig) return;
+    const updated = { ...renameConfig, enabled };
+    const saved = await window.ipc.invoke(
+      DOWNLOAD_IPC_CHANNELS.SAVE_RENAME_CONFIG,
+      updated,
+    );
+    setRenameConfig(saved);
+    toast.success(enabled ? '自动重命名已开启' : '自动重命名已关闭');
+  };
 
   const saveConfig = async (updates: Partial<DownloadConfig>) => {
     const newConfig = { ...config, ...updates };
@@ -322,6 +355,20 @@ export function DownloadSettingsSheet({
             <Switch
               checked={config?.downloadSubtitles ?? false}
               onCheckedChange={(v) => saveConfig({ downloadSubtitles: v })}
+            />
+          </div>
+
+          {/* 自动重命名 */}
+          <div className="flex items-center justify-between">
+            <div>
+              <Label className="text-sm font-medium">自动重命名</Label>
+              <p className="text-xs text-muted-foreground">
+                下载完成后按规则自动重命名（如 20260614-华创宏观张瑜：标题.mp3）
+              </p>
+            </div>
+            <Switch
+              checked={renameConfig?.enabled ?? true}
+              onCheckedChange={saveRenameEnabled}
             />
           </div>
 

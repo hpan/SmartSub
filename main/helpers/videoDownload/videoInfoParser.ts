@@ -97,6 +97,7 @@ function parseVideoData(
     thumbnail: data.thumbnail || null,
     duration: data.duration || null,
     uploader: data.uploader || data.channel || null,
+    uploadDate: data.upload_date || null,
     originalUrl: url,
     platform,
     formats,

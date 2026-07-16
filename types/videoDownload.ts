@@ -40,6 +40,8 @@ export interface DownloadVideoInfo {
   duration: number | null;
   /** 作者/上传者 */
   uploader: string | null;
+  /** 上传日期 (YYYYMMDD) */
+  uploadDate: string | null;
   /** 原始 URL */
   originalUrl: string;
   /** 平台 */
@@ -203,4 +205,8 @@ export const DOWNLOAD_IPC_CHANNELS = {
   // 小宇宙
   PARSE_XYZ: 'download:parseXyz',
   DOWNLOAD_XYZ: 'download:downloadXyz',
+
+  // 重命名规则
+  GET_RENAME_CONFIG: 'download:getRenameConfig',
+  SAVE_RENAME_CONFIG: 'download:saveRenameConfig',
 } as const;
