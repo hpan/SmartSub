@@ -59,6 +59,13 @@ function getAudioDuration(filePath: string): Promise<number> {
   });
 }
 
+/**
+ * 精确切割音视频片段
+ *
+ * -ss 放在 -i 前面：快速跳到目标位置附近的关键帧（瞬间完成）
+ * 然后重编码确保帧级精度，使用 ultrafast 预设尽量提速
+ * 音频用 -c:a copy 流复制（不需要重编码，速度快）
+ */
 function cutAudio(
   inputPath: string,
   outputPath: string,
@@ -67,13 +74,18 @@ function cutAudio(
   onProgress?: (percent: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    // 快速定位 + 流复制：-ss 作为 input option 放在 -i 前面
-    // ffmpeg 会先跳到最近的关键帧（瞬间），然后从那里开始 copy
-    // 比纯 output -ss 快很多，精度对裁切场景足够
     const cmd = ffmpeg(inputPath)
       .inputOptions('-ss', String(startTime))
       .duration(duration)
-      .outputOptions('-c', 'copy', '-y')
+      .outputOptions(
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-c:a',
+        'copy',
+        '-y',
+      )
       .on('start', (str) => {
         logMessage(`audio cut start: ${str}`, 'info');
       })
@@ -92,7 +104,6 @@ function cutAudio(
       })
       .save(outputPath);
 
-    // 保存引用以便取消
     activeFfmpegCommands.push(cmd);
   });
 }
