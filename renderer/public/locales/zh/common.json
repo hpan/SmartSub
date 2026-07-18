@@ -325,6 +325,6 @@
     "localCli": "本地命令",
     "cloud": "云端听写"
   },
-  "videoDownload": "视频下载",
-  "audioCut": "音视频裁切"
+  "videoDownload": "下载",
+  "audioCut": "裁切"
 }

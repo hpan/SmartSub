@@ -325,6 +325,6 @@
     "localCli": "Local command",
     "cloud": "Cloud ASR"
   },
-  "videoDownload": "Video Download",
-  "audioCut": "Audio/Video Cut"
+  "videoDownload": "Download",
+  "audioCut": "Cut"
 }
