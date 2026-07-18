@@ -70,6 +70,7 @@ function WaveformCanvas({
   startWaveform,
   endWaveform,
   silenceData,
+  keyframes,
   duration,
   checkDuration,
   currentTime,
@@ -78,6 +79,7 @@ function WaveformCanvas({
   startWaveform: number[];
   endWaveform: number[];
   silenceData: SilenceData | null;
+  keyframes: number[];
   duration: number;
   checkDuration: number;
   currentTime: number;
@@ -363,6 +365,7 @@ export default function AudioCutPanel() {
   const [startWaveform, setStartWaveform] = useState<number[]>([]);
   const [endWaveform, setEndWaveform] = useState<number[]>([]);
   const [silenceData, setSilenceData] = useState<SilenceData | null>(null);
+  const [keyframes, setKeyframes] = useState<number[]>([]);
   const [detecting, setDetecting] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(-1);
@@ -400,6 +403,7 @@ export default function AudioCutPanel() {
         setStartWaveform([]);
         setEndWaveform([]);
         setSilenceData(null);
+        setKeyframes([]);
         setCurrentTime(-1);
         setPlaying(false);
 
@@ -413,22 +417,23 @@ export default function AudioCutPanel() {
         // 自动检测静音并生成波形
         setDetecting(true);
         try {
-          // 并行检测静音和生成波形
-          const [silenceRes, startWaveRes, endWaveRes] = await Promise.all([
-            window.ipc.invoke('audioCut:detectSilence', { filePath }),
-            window.ipc.invoke('audioCut:getWaveform', {
-              filePath,
-              samples: 300,
-              startTime: 0,
-              endTime: Math.min(checkDuration, infoRes.data.duration / 2),
-            }),
-            window.ipc.invoke('audioCut:getWaveform', {
-              filePath,
-              samples: 300,
-              startTime: Math.max(0, infoRes.data.duration - checkDuration),
-              endTime: infoRes.data.duration,
-            }),
-          ]);
+          // 并行检测静音、波形和关键帧
+          const [silenceRes, startWaveRes, endWaveRes, keyframeRes] =
+            await Promise.all([
+              window.ipc.invoke('audioCut:detectSilence', { filePath }),
+              window.ipc.invoke('audioCut:getWaveform', {
+                filePath,
+                samples: 300,
+                startTime: 0,
+                endTime: Math.min(checkDuration, infoRes.data.duration / 2),
+              }),
+              window.ipc.invoke('audioCut:getWaveform', {
+                filePath,
+                samples: 300,
+                startTime: Math.max(0, infoRes.data.duration - checkDuration),
+                endTime: infoRes.data.duration,
+              }),
+            ]);
 
           if (silenceRes.success) {
             setSilenceData(silenceRes.data);
@@ -449,6 +454,10 @@ export default function AudioCutPanel() {
 
           if (startWaveRes.success) setStartWaveform(startWaveRes.data.samples);
           if (endWaveRes.success) setEndWaveform(endWaveRes.data.samples);
+
+          if (keyframeRes.success && keyframeRes.data.keyframes.length > 0) {
+            setKeyframes(keyframeRes.data.keyframes);
+          }
         } catch (error) {
           console.error('Detection error:', error);
         } finally {
@@ -706,6 +715,7 @@ export default function AudioCutPanel() {
               setStartWaveform([]);
               setEndWaveform([]);
               setSilenceData(null);
+              setKeyframes([]);
               setCurrentTime(-1);
               setPlaying(false);
               if (audioRef.current) {
@@ -845,37 +855,85 @@ export default function AudioCutPanel() {
 
           <div className="flex flex-col gap-2">
             {cutPoints.map((cp, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground w-16 flex-shrink-0">
-                  切割点 {i + 1}
-                </span>
-                <input
-                  type="text"
-                  placeholder="00:00:00.0"
-                  value={cp}
-                  onChange={(e) => handlePointChange(i, e.target.value)}
-                  className="flex-1 h-8 px-3 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  onClick={() => {
-                    const t = parseTimeInput(cp);
-                    if (t !== null) seekTo(t);
-                  }}
-                >
-                  跳转
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                  onClick={() => handleRemovePoint(i)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
+              <React.Fragment key={i}>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground w-16 flex-shrink-0">
+                    切割点 {i + 1}
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="00:00:00.0"
+                    value={cp}
+                    onChange={(e) => handlePointChange(i, e.target.value)}
+                    className="flex-1 h-8 px-3 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => {
+                      const t = parseTimeInput(cp);
+                      if (t !== null) seekTo(t);
+                    }}
+                  >
+                    跳转
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => handleRemovePoint(i)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                {(() => {
+                  const t = parseTimeInput(cp);
+                  if (t === null || keyframes.length === 0) return null;
+                  let prev: number | null = null;
+                  let next: number | null = null;
+                  for (const kf of keyframes) {
+                    if (kf <= t) prev = kf;
+                    if (kf > t && next === null) next = kf;
+                  }
+                  if (prev === null && next === null) return null;
+                  return (
+                    <div className="flex items-center gap-2 ml-16 mb-1 text-xs text-muted-foreground">
+                      <span className="text-yellow-500">◆</span>
+                      关键帧:
+                      {prev !== null && (
+                        <button
+                          className="text-yellow-600 hover:underline cursor-pointer"
+                          onClick={() =>
+                            handlePointChange(
+                              i,
+                              formatSeconds(Math.round(prev! * 1000) / 1000),
+                            )
+                          }
+                          title="跳到此关键帧（快速裁切）"
+                        >
+                          ← {formatSeconds(Math.round(prev * 1000) / 1000)}
+                        </button>
+                      )}
+                      {prev !== null && next !== null && <span>|</span>}
+                      {next !== null && (
+                        <button
+                          className="text-yellow-600 hover:underline cursor-pointer"
+                          onClick={() =>
+                            handlePointChange(
+                              i,
+                              formatSeconds(Math.round(next! * 1000) / 1000),
+                            )
+                          }
+                          title="跳到此关键帧（快速裁切）"
+                        >
+                          {formatSeconds(Math.round(next * 1000) / 1000)} →
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+              </React.Fragment>
             ))}
           </div>
 
