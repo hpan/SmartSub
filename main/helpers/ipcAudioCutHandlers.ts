@@ -152,7 +152,7 @@ export function setupAudioCutHandlers(mainWindow: BrowserWindow) {
   });
 
   // 获取音频信息
-  ipcMain.handle('audioCut:getInfo', async (_event, { filePath }) => {
+  ipcMain.handle('audioCut:getInfo', async (_event, { filePath }: { filePath: string }) => {) => {
     try {
       if (!fs.existsSync(filePath)) {
         return { success: false, error: '文件不存在' };
@@ -252,7 +252,7 @@ export function setupAudioCutHandlers(mainWindow: BrowserWindow) {
   });
 
   // 打开文件所在目录
-  ipcMain.handle('audioCut:openFolder', async (_event, { filePath }) => {
+  ipcMain.handle('audioCut:openFolder', async (_event, { filePath }: { filePath: string }) => {) => {
     try {
       shell.showItemInFolder(filePath);
       return { success: true };
@@ -621,4 +621,4 @@ ipcMain.handle(
 // 检测视频关键帧位置
 ipcMain.handle(
   'audioCut:detectKeyframes',
-  async (_event, { filePath }
+  async (_event, { filePath }: { filePath: string }) => {
