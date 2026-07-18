@@ -1,4 +1,4 @@
 {
-  "pageTitle": "Audio Cut",
-  "pageDesc": "Select an audio file and split it into segments at specified time points"
+  "pageTitle": "Cut",
+  "pageDesc": "Select an audio or video file and split it into segments at specified time points"
 }

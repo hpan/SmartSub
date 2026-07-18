@@ -540,7 +540,7 @@ export default function AudioCutPanel() {
 
           audioRef.current.addEventListener('error', (e) => {
             console.error('Audio error:', e);
-            toast.error('音频加载失败');
+            toast.error('文件加载失败');
             setPlaying(false);
           });
 
@@ -724,7 +724,7 @@ export default function AudioCutPanel() {
       {detecting && (
         <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
           <Loader2 className="h-4 w-4 animate-spin" />
-          <span className="text-sm">正在分析音频波形和静音区域...</span>
+          <span className="text-sm">正在分析波形和静音区域...</span>
         </div>
       )}
 
@@ -732,9 +732,7 @@ export default function AudioCutPanel() {
       {(startWaveform.length > 0 || endWaveform.length > 0) && audioInfo && (
         <div className="border rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
-            <div className="font-medium text-sm">
-              音频波形（开头/结尾各3分钟）
-            </div>
+            <div className="font-medium text-sm">波形（开头/结尾各3分钟）</div>
             <div className="flex items-center gap-2">
               {/* 播放按钮 */}
               <Button
@@ -777,11 +775,11 @@ export default function AudioCutPanel() {
               </span>
               <span className="flex items-center gap-1">
                 <span className="w-3 h-2 bg-green-500 rounded"></span>
-                音频开始: {formatSeconds(silenceData.audioStart)}
+                开始: {formatSeconds(silenceData.audioStart)}
               </span>
               <span className="flex items-center gap-1">
                 <span className="w-3 h-2 bg-blue-500 rounded"></span>
-                音频结束: {formatSeconds(silenceData.audioEnd)}
+                结束: {formatSeconds(silenceData.audioEnd)}
               </span>
             </div>
           )}

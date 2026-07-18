@@ -59,6 +59,11 @@ function getAudioDuration(filePath: string): Promise<number> {
   });
 }
 
+function isVideoFile(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.mts'].includes(ext);
+}
+
 function cutAudio(
   inputPath: string,
   outputPath: string,
@@ -67,10 +72,16 @@ function cutAudio(
   onProgress?: (percent: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    // 视频文件使用重编码以确保精确切割（-c copy 只能在关键帧切割，误差可达数秒）
+    // 音频文件使用流复制，速度快且精度足够
+    const useReencode = isVideoFile(inputPath);
+    const outputOpts = useReencode
+      ? ['-c:v', 'libx264', '-c:a', 'aac', '-y']
+      : ['-c', 'copy', '-y'];
     const cmd = ffmpeg(inputPath)
       .setStartTime(startTime)
       .duration(duration)
-      .outputOptions('-c', 'copy', '-y')
+      .outputOptions(...outputOpts)
       .on('start', (str) => {
         logMessage(`audio cut start: ${str}`, 'info');
       })
