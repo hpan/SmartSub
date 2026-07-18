@@ -18,6 +18,8 @@ const STAGE_KEYS = [
   'extractSubtitle',
   'translateSubtitle',
   'prepareSubtitle',
+  'dubbing',
+  'composeVideo',
 ] as const;
 
 function markInterruptedFile(file: IFiles): IFiles {
@@ -34,6 +36,12 @@ function markInterruptedFile(file: IFiles): IFiles {
 function applyInterruptedMarkToWorkItems() {
   workItems = workItems.map((item) => {
     if (item.type === 'proofread') return item;
+    if (item.type === 'dubbing') {
+      // 配音是会话级工作项（无 pipelineFiles）：上次退出时仍在跑 → 标记中断。
+      return item.status === 'running'
+        ? { ...item, status: 'interrupted' as const }
+        : item;
+    }
     const pipelineFiles = (item.pipelineFiles || []).map(markInterruptedFile);
     return {
       ...item,

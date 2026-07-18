@@ -22,6 +22,8 @@ import {
   setupWorkItemStoreLifecycle,
 } from './helpers/workItemStore';
 import { setupWorkItemHandlers } from './helpers/workItemHandlers';
+import { setupRecipeHandlers } from './helpers/ipcRecipeHandlers';
+import { setupGlossaryHandlers } from './helpers/ipcGlossaryHandlers';
 import { setupAutoUpdater } from './helpers/updater';
 import { setupAppMenu } from './helpers/menu';
 import { setupWindowCloseBehavior, markQuitting } from './helpers/windowClose';
@@ -30,6 +32,9 @@ import { setupProofreadHandlers } from './helpers/ipcProofreadHandlers';
 import { setupSubtitleMergeHandlers } from './helpers/ipcSubtitleMergeHandlers';
 import { setupAudioCutHandlers } from './helpers/ipcAudioCutHandlers';
 import { setupVideoDownloadHandlers } from './helpers/videoDownload/ipcVideoDownloadHandlers';
+import { setupDubbingHandlers } from './helpers/ipcDubbingHandlers';
+import { setupPipelineHandlers } from './helpers/ipcPipelineHandlers';
+import { setupVoiceCloneHandlers } from './helpers/ipcVoiceCloneHandlers';
 import { configurationManager } from './service/configurationManager';
 import {
   registerAddonIpcHandlers,
@@ -50,6 +55,7 @@ import {
   setAppDisplayNameEarly,
 } from './helpers/appBranding';
 import { getDevSimulationConfig, getGpuEnvironment } from './helpers/cudaUtils';
+import { cleanupOldLogs } from './helpers/logStorage';
 
 //控制台出现中文乱码，需要去node_modules\electron\cli.js中修改启动代码页
 
@@ -107,7 +113,9 @@ app.on('before-quit', (event) => {
 
   // 注册自定义协议处理本地媒体文件
   protocol.registerFileProtocol('media', (request, callback) => {
-    const url = request.url.substr(8); // 移除 "media://" 部分
+    // 查询串仅作回放缓存击穿用（配音行重合成后同名 wav 内容已变，
+    // Chromium 会按 URL 缓存媒体响应），取文件路径前剥离。
+    const url = request.url.substr(8).split('?')[0]; // 移除 "media://" 部分
     try {
       const decodedUrl = decodeURIComponent(url);
       return callback({ path: decodedUrl });
@@ -118,6 +126,15 @@ app.on('before-quit', (event) => {
   });
 
   setupStoreHandlers();
+  // 日志已迁移到按日 JSONL 文件：清理过期文件，并移除旧版本遗留在 config.json 中的 logs 键
+  void cleanupOldLogs();
+  const legacyStore = store as unknown as {
+    has(key: string): boolean;
+    delete(key: string): void;
+  };
+  if (legacyStore.has('logs')) {
+    legacyStore.delete('logs');
+  }
   // 代理须在任何联网（providers 初始化 / 下载 / 更新检测）前生效
   applyProxyFromSettings();
   setupParameterHandlers();
@@ -171,11 +188,16 @@ app.on('before-quit', (event) => {
   initializeWorkItemStore();
   setupWorkItemStoreLifecycle();
   setupWorkItemHandlers();
+  setupRecipeHandlers();
+  setupGlossaryHandlers(mainWindow);
   setupTaskManager();
   setupAutoUpdater(mainWindow);
   setupSubtitleMergeHandlers(mainWindow);
   setupAudioCutHandlers(mainWindow);
   setupVideoDownloadHandlers(mainWindow);
+  setupDubbingHandlers(mainWindow);
+  setupPipelineHandlers(mainWindow);
+  setupVoiceCloneHandlers(mainWindow);
   setMainWindowForAddon(mainWindow);
   registerEngineIpcHandlers();
   setMainWindowForEngine(mainWindow);

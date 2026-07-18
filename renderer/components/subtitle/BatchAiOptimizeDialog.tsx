@@ -264,6 +264,7 @@ IMPORTANT: Return ONLY a valid JSON object with subtitle IDs as keys and optimiz
         batchSize,
         maxRetries: 2,
         batchId,
+        mode: isTranscriptMode ? 'transcript' : 'translation',
       });
 
       if (result.success && result.data) {
@@ -438,7 +439,7 @@ IMPORTANT: Return ONLY a valid JSON object with subtitle IDs as keys and optimiz
                       {aiProviders.some((p) => isProviderConfigured(p)) && (
                         <SelectGroup>
                           <SelectLabel className="flex items-center gap-1.5 pl-2 text-foreground">
-                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                            <CheckCircle2 className="h-3.5 w-3.5 text-success" />
                             {t('providerGroup.configured')}
                           </SelectLabel>
                           {aiProviders

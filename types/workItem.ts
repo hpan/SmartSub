@@ -10,14 +10,22 @@ export type PipelineWorkItemType =
 /** 校对批次工作项 */
 export type ProofreadWorkItemType = 'proofread';
 
-export type WorkItemType = PipelineWorkItemType | ProofreadWorkItemType;
+/** 配音工作台工作项（会话级：字幕 + 可选视频 → 配音产物） */
+export type DubbingWorkItemType = 'dubbing';
+
+export type WorkItemType =
+  | PipelineWorkItemType
+  | ProofreadWorkItemType
+  | DubbingWorkItemType;
 
 export type WorkItemStatus =
   | 'waiting'
   | 'running'
   | 'done'
   | 'error'
-  | 'interrupted';
+  | 'interrupted'
+  /** 有文件停靠在人工检查点等待校对（非完成、非错误的中间态） */
+  | 'review';
 
 /** 流水线文件 — P19-1 先与 IFiles 对齐，后续正型 */
 export type PipelineFile = IFiles;

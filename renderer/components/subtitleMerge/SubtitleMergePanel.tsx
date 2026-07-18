@@ -1,16 +1,20 @@
 /**
- * 字幕合并主面板组件
- * 左栏：文件 + 样式 + 输出控件（滚动）；右栏：预览独占并最大化，处理状态以浮层呈现
+ * 字幕合并主面板组件 — NLE 三区版式：
+ * 左 inspector（样式设置滚动栏）｜右舞台（文件条 + 预览 + 迷你时间轴）｜底部输出行动条
  */
 
 import React from 'react';
 import { useTranslation } from 'next-i18next';
-import { Card, CardContent } from '@/components/ui/card';
+import { Paintbrush, Play, Video } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Panel, PanelHeader } from '@/components/ui/panel';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import StepGuide from '@/components/StepGuide';
 import FileSelector from './FileSelector';
 import StylePresets from './StylePresets';
 import BasicStyleSettings from './BasicStyleSettings';
+import EffectStyleSettings from './EffectStyleSettings';
 import AdvancedStyleSettings from './AdvancedStyleSettings';
 import VideoPreview from './VideoPreview';
 import MergeButton from './MergeButton';
@@ -46,15 +50,21 @@ export default function SubtitleMergePanel({
     subtitlePath,
     videoInfo,
     subtitleInfo,
+    audioTrackPath,
+    audioTrackMode,
 
     // 样式状态
     style,
     activePresetId,
+    userPresets,
 
     // 输出状态
     outputPath,
     outputMode,
     videoQuality,
+    encoderMode,
+    hwAccelInfo,
+    hwFallbackOccurred,
 
     // 进度状态
     progress,
@@ -63,17 +73,23 @@ export default function SubtitleMergePanel({
     // 文件操作方法
     selectVideo,
     selectSubtitle,
+    selectAudioTrack,
+    setAudioTrackMode,
     clearVideo,
     clearSubtitle,
+    clearAudioTrack,
 
     // 样式操作方法
     updateStyle,
     applyPreset,
+    saveStylePreset,
+    deleteStylePreset,
 
     // 输出操作方法
     selectOutputPath,
     setOutputMode,
     setVideoQuality,
+    setEncoderMode,
 
     // 合并操作方法
     startMerge,
@@ -91,77 +107,86 @@ export default function SubtitleMergePanel({
   const styleDisabled = isProcessing || isSoftMux;
 
   return (
-    <div className={`h-full flex flex-col ${className}`}>
-      {videoPath && subtitlePath && !outputPath && status !== 'processing' && (
-        <div className="flex-shrink-0 mb-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-muted-foreground">
-          {t('outputPathRequiredHint')}
-        </div>
-      )}
-      {/* 文件选择区域 - 紧凑型，置顶全宽 */}
-      <div className="flex-shrink-0 mb-3">
-        <FileSelector
-          videoPath={videoPath}
-          subtitlePath={subtitlePath}
-          videoInfo={videoInfo}
-          subtitleInfo={subtitleInfo}
-          onSelectVideo={selectVideo}
-          onSelectSubtitle={selectSubtitle}
-          onClearVideo={clearVideo}
-          onClearSubtitle={clearSubtitle}
-          disabled={isProcessing}
+    <div
+      className={`grid h-full min-h-0 grid-cols-1 gap-2.5 lg:grid-cols-[332px_minmax(0,1fr)] ${className}`}
+    >
+      {/* 左 inspector：字幕样式（分区滚动） */}
+      <Panel className="min-h-0 overflow-hidden">
+        <PanelHeader
+          title={t('styleInspector')}
+          meta={isSoftMux ? t('styleOnlyForHardcode') : undefined}
         />
-      </div>
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="space-y-3 p-3">
+            {/* 预设样式（系统预设 + 我的样式） */}
+            <StylePresets
+              activePresetId={activePresetId}
+              onSelectPreset={applyPreset}
+              disabled={styleDisabled}
+              userPresets={userPresets}
+              onSaveStylePreset={saveStylePreset}
+              onDeleteStylePreset={deleteStylePreset}
+            />
 
-      {/* 主内容区域 - 左：设置+输出（窄栏滚动）；右：预览独占（最大化） */}
-      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(340px,400px)_1fr] gap-3">
-        {/* 左侧：样式设置 + 输出控件 */}
-        <Card className="flex flex-col min-h-0 overflow-hidden">
-          <CardContent className="flex-1 min-h-0 p-0">
-            <ScrollArea className="h-full">
-              <div className="space-y-3 p-4">
-                {/* 软字幕模式提示：样式仅对烧录生效 */}
-                {isSoftMux && (
-                  <p className="rounded-md bg-muted/60 p-2 text-xs text-muted-foreground">
-                    {t('styleOnlyForHardcode')}
-                  </p>
-                )}
+            <Separator />
 
-                {/* 预设样式 */}
-                <StylePresets
-                  activePresetId={activePresetId}
-                  onSelectPreset={applyPreset}
-                  disabled={styleDisabled}
-                />
+            {/* 基础设置 */}
+            <div>
+              <h3 className="label-caps mb-2">{t('basicSettings')}</h3>
+              <BasicStyleSettings
+                style={style}
+                onUpdateStyle={updateStyle}
+                disabled={styleDisabled}
+              />
+            </div>
 
-                <Separator />
+            <Separator />
 
-                {/* 基础设置 */}
-                <div>
-                  <h3 className="label-caps mb-2">{t('basicSettings')}</h3>
-                  <BasicStyleSettings
-                    style={style}
-                    onUpdateStyle={updateStyle}
-                    disabled={styleDisabled}
-                  />
-                </div>
+            {/* 样式效果：描边/背景框模式二选一 + 按模式显示生效参数 */}
+            <div>
+              <h3 className="label-caps mb-2">{t('effectSettings')}</h3>
+              <EffectStyleSettings
+                style={style}
+                onUpdateStyle={updateStyle}
+                disabled={styleDisabled}
+              />
+            </div>
 
-                <Separator />
+            <Separator />
 
-                {/* 高级设置 */}
-                <AdvancedStyleSettings
-                  style={style}
-                  onUpdateStyle={updateStyle}
-                  disabled={styleDisabled}
-                />
-              </div>
-            </ScrollArea>
-          </CardContent>
-        </Card>
+            {/* 高级设置 */}
+            <AdvancedStyleSettings
+              style={style}
+              onUpdateStyle={updateStyle}
+              disabled={styleDisabled}
+            />
+          </div>
+        </ScrollArea>
+      </Panel>
 
-        {/* 右侧：上=预览（最大化），下=输出控件，填满预览之外的竖向空间 */}
-        <div className="flex flex-col min-h-0 gap-3">
-          <Card className="flex-1 flex flex-col min-h-0 overflow-hidden">
-            <CardContent className="flex-1 min-h-0 p-3 overflow-hidden">
+      {/* 右舞台 + 底部输出行动条 */}
+      <div className="flex min-h-0 flex-col gap-2.5">
+        <Panel className="min-h-0 flex-1 overflow-hidden">
+          {/* 文件条：视频槽 + 字幕槽（30px 紧凑槽位） */}
+          <div className="flex flex-none items-center gap-2 border-b border-border p-2">
+            <FileSelector
+              videoPath={videoPath}
+              subtitlePath={subtitlePath}
+              videoInfo={videoInfo}
+              subtitleInfo={subtitleInfo}
+              audioTrackPath={audioTrackPath}
+              onSelectVideo={selectVideo}
+              onSelectSubtitle={selectSubtitle}
+              onSelectAudioTrack={selectAudioTrack}
+              onClearVideo={clearVideo}
+              onClearSubtitle={clearSubtitle}
+              onClearAudioTrack={clearAudioTrack}
+              disabled={isProcessing}
+            />
+          </div>
+          {/* 舞台：预览 + 走带（原生控制条）+ 迷你时间轴；未选视频时为统一三步引导 */}
+          <div className="min-h-0 flex-1 overflow-hidden p-2.5">
+            {videoPath ? (
               <VideoPreview
                 videoPath={videoPath}
                 videoInfo={videoInfo}
@@ -173,26 +198,63 @@ export default function SubtitleMergePanel({
                 onCancelMerge={cancelMerge}
                 onOpenOutputFolder={openOutputFolder}
               />
-            </CardContent>
-          </Card>
-
-          {/* 输出方式 + 画质 + 路径 + 生成 */}
-          <Card className="flex-shrink-0">
-            <CardContent className="p-4">
-              <MergeButton
-                outputPath={outputPath}
-                outputMode={outputMode}
-                videoQuality={videoQuality}
-                status={status}
-                canMerge={canMerge}
-                onSelectOutputPath={selectOutputPath}
-                onOutputModeChange={setOutputMode}
-                onVideoQualityChange={setVideoQuality}
-                onStartMerge={startMerge}
+            ) : (
+              <StepGuide
+                steps={[
+                  {
+                    icon: Video,
+                    title: t('emptyGuide.step1'),
+                    desc: t('emptyGuide.step1Desc'),
+                  },
+                  {
+                    icon: Paintbrush,
+                    title: t('emptyGuide.step2'),
+                    desc: t('emptyGuide.step2Desc'),
+                  },
+                  {
+                    icon: Play,
+                    title: t('emptyGuide.step3'),
+                    desc: t('emptyGuide.step3Desc'),
+                  },
+                ]}
+                actions={
+                  <Button onClick={selectVideo} disabled={isProcessing}>
+                    <Video className="h-4 w-4" />
+                    {t('clickToSelectVideo')}
+                  </Button>
+                }
               />
-            </CardContent>
-          </Card>
-        </div>
+            )}
+          </div>
+        </Panel>
+
+        {/* 输出行动条：方式 + 画质 + 路径 + 生成（主行动固定右下热区） */}
+        <Panel className="flex-none">
+          <div className="p-2.5">
+            <MergeButton
+              outputPath={outputPath}
+              outputMode={outputMode}
+              videoQuality={videoQuality}
+              encoderMode={encoderMode}
+              hwAccelInfo={hwAccelInfo}
+              hwFallbackOccurred={hwFallbackOccurred}
+              hasAudioTrack={Boolean(audioTrackPath)}
+              audioTrackMode={audioTrackMode}
+              queuedAhead={progress.queuedAhead || 0}
+              status={status}
+              canMerge={canMerge}
+              needsOutputPath={Boolean(
+                videoPath && subtitlePath && !outputPath && !isProcessing,
+              )}
+              onSelectOutputPath={selectOutputPath}
+              onOutputModeChange={setOutputMode}
+              onVideoQualityChange={setVideoQuality}
+              onEncoderModeChange={setEncoderMode}
+              onAudioTrackModeChange={setAudioTrackMode}
+              onStartMerge={startMerge}
+            />
+          </div>
+        </Panel>
       </div>
     </div>
   );

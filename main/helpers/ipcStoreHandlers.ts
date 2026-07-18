@@ -6,8 +6,20 @@ import { inferDisplayOutcome } from './engines/outcomePresets';
 import { getAndInitializeProviders } from './providerManager';
 import { getAsrProviders, setAsrProviders } from './asrProviderManager';
 import { testAsrConnection } from '../service/asr/testConnection';
+import { getTtsProviders, setTtsProviders } from './ttsProviderManager';
+import { testTtsConnection } from '../service/tts/testConnection';
+import { listElevenLabsVoices } from '../service/tts/elevenlabs';
+import { listAzureVoices } from '../service/tts/azure';
+import { TTS_AZURE_SPEECH, TTS_ELEVENLABS } from '../../types/ttsProvider';
 import { logMessage } from './logger';
 import { LogEntry } from './store/types';
+import {
+  appendLog,
+  queryLogs,
+  listLogDates,
+  clearLogs,
+  LogQuery,
+} from './logStorage';
 import { getBuildInfo } from './buildInfo';
 import { exportConfig, importConfig } from './configExporter';
 import { rebuildAppMenu } from './menu';
@@ -75,6 +87,40 @@ export function setupStoreHandlers() {
     return testAsrConnection(provider);
   });
 
+  // 云端配音（TTS）服务商实例：语义对齐 asrProviders。
+  ipcMain.on('setTtsProviders', async (event, providers) => {
+    setTtsProviders(providers);
+  });
+
+  ipcMain.handle('getTtsProviders', async () => {
+    return getTtsProviders();
+  });
+
+  // 云 TTS 实例连通性自测：真实合成一句短文本（无零成本探针）。
+  ipcMain.handle('testTtsProvider', async (_event, provider) => {
+    return testTtsConnection(provider);
+  });
+
+  // 在线拉取音色清单（voiceListMode 类型：ElevenLabs 账号音色 / Azure 区域全量）。
+  ipcMain.handle('listTtsVoices', async (_event, provider) => {
+    try {
+      let voices: Array<{ id: string; name: string }>;
+      if (provider?.type === TTS_ELEVENLABS) {
+        voices = await listElevenLabsVoices(provider);
+      } else if (provider?.type === TTS_AZURE_SPEECH) {
+        voices = await listAzureVoices(provider);
+      } else {
+        return { ok: false, detail: `unsupported type: ${provider?.type}` };
+      }
+      return { ok: true, voices };
+    } catch (error) {
+      return {
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
   // 用户配置相关处理
   ipcMain.on('setUserConfig', async (event, config) => {
     store.set('userConfig', config);
@@ -131,36 +177,29 @@ export function setupStoreHandlers() {
     return store.get('settings');
   });
 
-  // 日志相关处理
+  // 日志相关处理（按日 JSONL 文件存储，见 logStorage.ts）
   ipcMain.handle(
     'addLog',
     async (event, logEntry: Omit<LogEntry, 'timestamp'>) => {
-      const logs = store.get('logs');
-      const newLog = {
+      const newLog: LogEntry = {
         ...logEntry,
         timestamp: Date.now(),
       };
-      store.set('logs', [...logs, newLog]);
+      appendLog(newLog);
       event.sender.send('newLog', newLog);
     },
   );
 
-  ipcMain.handle('getLogs', async (event, projectId?: string) => {
-    const logs = store.get('logs') || [];
-    if (!projectId) return logs;
-    return logs.filter((log) => log.projectId === projectId);
+  ipcMain.handle('getLogs', async (_event, query?: LogQuery) => {
+    return queryLogs(query || {});
+  });
+
+  ipcMain.handle('getLogDates', async () => {
+    return listLogDates();
   });
 
   ipcMain.handle('clearLogs', async (_event, projectId?: string) => {
-    const logs = store.get('logs') || [];
-    if (!projectId) {
-      store.set('logs', []);
-      return true;
-    }
-    store.set(
-      'logs',
-      logs.filter((log) => log.projectId !== projectId),
-    );
+    await clearLogs(projectId);
     return true;
   });
 

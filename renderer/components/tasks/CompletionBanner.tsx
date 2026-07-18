@@ -1,6 +1,7 @@
 import React from 'react';
 import { useRouter } from 'next/router';
 import {
+  AudioLines,
   CheckCircle2,
   ChevronDown,
   Edit2,
@@ -128,16 +129,37 @@ const CompletionBanner: React.FC<CompletionBannerProps> = ({
     );
   };
 
+  // 去配音：产出字幕（优先译文）+ 源视频（媒体任务）预填工作台。
+  // 纯字幕任务（translateOnly）同样可配（仅音频输出），不带 video。
+  const dubbableFiles = doneFiles.filter((file) =>
+    Boolean(getMergeSubtitle(file)),
+  );
+
+  const handleGoDubbing = (file: any) => {
+    const params = new URLSearchParams();
+    params.set('subtitle', getMergeSubtitle(file));
+    if (typeDef.accepts === 'media' && file.filePath) {
+      params.set('video', file.filePath);
+    }
+    router.push(`/${locale}/dubbing?${params.toString()}`);
+  };
+
   const fileLabel = (file: any) =>
     `${file?.fileName ?? ''}${file?.fileExtension ?? ''}`;
 
-  if (!doneFiles.length && failedFiles.length > 0) {
+  // 向导流水线任务（快照含配音/成片）：完整流程已在向导里配置、产物随任务
+  // 产出，不再弹通用完成横幅；仅失败时（含部分失败）保留聚合重试提示。
+  const pipelineTask = Boolean(formData?.dub || formData?.compose);
+
+  if (failedFiles.length > 0 && (pipelineTask || !doneFiles.length)) {
     return (
       <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 flex items-center gap-3 flex-wrap">
         <RotateCcw className="h-5 w-5 text-destructive flex-shrink-0" />
         <div className="min-w-0 flex-1">
           <span className="text-sm font-medium text-destructive">
-            {t('completion.allFailedTitle', { failed: failedFiles.length })}
+            {doneFiles.length
+              ? t('completion.someFailedTitle', { failed: failedFiles.length })
+              : t('completion.allFailedTitle', { failed: failedFiles.length })}
           </span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -163,7 +185,7 @@ const CompletionBanner: React.FC<CompletionBannerProps> = ({
     );
   }
 
-  if (!doneFiles.length) return null;
+  if (!doneFiles.length || pipelineTask) return null;
 
   return (
     <div className="rounded-lg border border-success/30 bg-success/5 px-4 py-3 flex items-center gap-3 flex-wrap">
@@ -297,6 +319,40 @@ const CompletionBanner: React.FC<CompletionBannerProps> = ({
             >
               <Film className="h-3 w-3" />
               {t('completion.goMerge')}
+            </Button>
+          )
+        )}
+        {dubbableFiles.length > 1 ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="h-7 text-xs gap-1">
+                <AudioLines className="h-3 w-3" />
+                {t('completion.goDubbing')}
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="max-w-[320px]">
+              {dubbableFiles.map((file) => (
+                <DropdownMenuItem
+                  key={file.uuid}
+                  className="text-xs"
+                  onClick={() => handleGoDubbing(file)}
+                >
+                  <span className="truncate">{fileLabel(file)}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          dubbableFiles.length === 1 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1"
+              onClick={() => handleGoDubbing(dubbableFiles[0])}
+            >
+              <AudioLines className="h-3 w-3" />
+              {t('completion.goDubbing')}
             </Button>
           )
         )}

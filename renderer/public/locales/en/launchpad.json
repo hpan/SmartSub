@@ -1,7 +1,70 @@
 {
   "title": "What would you like to do?",
   "subtitle": "Pick a task to start — you can also drop files straight onto a card",
+  "startPanel": {
+    "title": "Start creating"
+  },
+  "recipes": {
+    "custom": "Custom flow",
+    "customDesc": "Open the wizard, mix goals and settings, save as a recipe",
+    "rename": "Rename",
+    "delete": "Delete",
+    "deleteTitle": "Delete this recipe?",
+    "deleteDesc": "This removes the \"{{name}}\" recipe. Existing tasks are not affected.",
+    "cancel": "Cancel",
+    "confirmDelete": "Delete"
+  },
+  "tools": {
+    "title": "Tools",
+    "panelTitle": "Toolbox",
+    "proofreadHint": "Review line by line, AI polish",
+    "mergeHint": "Burn subtitles into the picture",
+    "dubbingHint": "Turn subtitle lines into speech"
+  },
+  "hero": {
+    "morning": "Good morning",
+    "noon": "Good afternoon",
+    "afternoon": "Good afternoon",
+    "evening": "Good evening",
+    "statTasks": "{{count}} tasks",
+    "statRunning": "{{count}} running",
+    "statDone": "{{count}} done"
+  },
+  "tips": {
+    "title": "Quick tips",
+    "search": "Search features and tasks from anywhere",
+    "drop": "Drop files onto a task card to start instantly",
+    "shortcuts": "See all keyboard shortcuts",
+    "settings": "Open settings"
+  },
+  "env": {
+    "title": "Environment",
+    "canWork": "Ready",
+    "model": "Speech model",
+    "gpu": "GPU",
+    "translation": "Translation",
+    "voice": "Voice / TTS",
+    "ready": "Ready",
+    "notInstalled": "Not installed",
+    "notConfigured": "Not configured",
+    "notDetected": "Not detected",
+    "gpuOn": "{{backend}} enabled",
+    "cpuMode": "CPU mode",
+    "configuredCount": "{{count}} configured",
+    "manage": "Manage",
+    "detail": "Details",
+    "goConfigure": "Set up"
+  },
+  "pipeline": {
+    "transcribe": "Transcribe",
+    "translate": "Translate",
+    "proofread": "Proofread",
+    "compose": "Compose",
+    "dubbing": "Dubbing"
+  },
   "card": {
+    "pipeline": "Video → dubbed final cut",
+    "pipelineDesc": "Transcribe, translate, dub and compose — fully automatic, straight to a final video",
     "generateTranslate": "Video → bilingual subtitles",
     "generateTranslateDesc": "Transcribe speech and translate it into your target language in one go",
     "generate": "Video → original subtitles",
@@ -11,20 +74,24 @@
     "proofread": "Proofread subtitles",
     "proofreadDesc": "Review line by line, with video preview and AI polish",
     "merge": "Burn to Video",
-    "mergeDesc": "Burn subtitles into the picture so they always show"
+    "mergeDesc": "Burn subtitles into the picture so they always show",
+    "dubbing": "Dubbing",
+    "dubbingDesc": "Synthesize speech line by line and align it to the timeline"
   },
   "needsModelBadge": "Needs a model",
   "banner": {
     "noModel": "No speech model yet — it turns speech into text. Download one to get started",
     "noModelCta": "Download recommended model",
     "noProvider": "Want translated subtitles? Set up a translation service first (free options available)",
-    "noProviderCta": "Set up"
+    "noProviderCta": "Set up",
+    "noTtsCta": "Set up a dubbing engine"
   },
   "recentTasks": "Recent tasks",
   "noRecentTasks": "No tasks yet — pick one above to get started",
   "dropHint": "Drop to import files",
   "fileCount": "{{count}} files",
   "recent": {
+    "footerHint": "Drop files onto a task card above to start a new task",
     "rename": "Rename",
     "delete": "Delete",
     "deleteTitle": "Delete this task record?",
@@ -62,7 +129,8 @@
     "waiting": "Waiting",
     "running": "Running",
     "done": "Done",
-    "error": "Error"
+    "error": "Error",
+    "review": "Needs review"
   },
   "noRecentTasksHint": "Finished tasks appear here. Drag files onto a card above to get started"
 }

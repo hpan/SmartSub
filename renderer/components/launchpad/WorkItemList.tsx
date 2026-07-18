@@ -27,6 +27,8 @@ export interface WorkItemListProps {
   tLaunchpad: (key: string, options?: Record<string, unknown>) => string;
   tTasks: (key: string) => string;
   showUpdatedAt?: boolean;
+  /** 嵌入 Panel 内时去掉外框（由容器提供边界） */
+  flush?: boolean;
 }
 
 export default function WorkItemList({
@@ -42,9 +44,10 @@ export default function WorkItemList({
   tLaunchpad,
   tTasks,
   showUpdatedAt = true,
+  flush = false,
 }: WorkItemListProps) {
   return (
-    <div className="rounded-lg border divide-y">
+    <div className={cn('divide-y', !flush && 'rounded-lg border')}>
       {items.map((item) => {
         const status = getWorkItemStatus(item);
         const editing = editingId === item.id;
@@ -89,11 +92,19 @@ export default function WorkItemList({
               })}
             </span>
             {showUpdatedAt ? (
-              <span className="hidden md:inline text-xs text-muted-foreground/70 tabular-nums flex-shrink-0">
+              <span className="tnum hidden flex-shrink-0 text-xs text-faint md:inline">
                 {formatWorkItemTime(item.updatedAt)}
               </span>
             ) : null}
-            <span className="text-xs text-muted-foreground flex-shrink-0 w-12 text-right">
+            <span
+              className={cn(
+                'w-12 flex-shrink-0 text-right text-xs',
+                status === 'running' && 'font-medium text-primary',
+                status === 'done' && 'text-success',
+                status === 'error' && 'text-destructive',
+                status === 'waiting' && 'text-faint',
+              )}
+            >
               {tLaunchpad(`status.${status as RecentStatus}`)}
             </span>
             <span

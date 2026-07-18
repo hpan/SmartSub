@@ -47,9 +47,22 @@ import {
   throwIfSignalCancelled,
   waitForTaskDelay,
 } from './taskContext';
+import {
+  buildGlossaryPromptBlock,
+  glossaryConflictFingerprint,
+  injectGlossaryPromptBlock,
+  matchGlossaryEntries,
+  selectGlossaryPromptEntries,
+} from '../glossary/core';
+import {
+  getActiveGlossaryResolution,
+  logGlossaryConflicts,
+  logGlossaryMatches,
+} from './glossaryManager';
 
 // 校对批量操作（批量 AI 优化 / 重翻失败）取消注册表
 const batchAbortControllers = new Map<string, AbortController>();
+const singleOptimizeConflictFingerprints = new WeakMap<object, string>();
 
 /**
  * 设置字幕校对相关的 IPC 处理器
@@ -472,17 +485,19 @@ export function setupProofreadHandlers(): void {
   ipcMain.handle(
     'optimizeSubtitle',
     async (
-      _event,
+      event,
       {
         sourceText,
         targetText,
         providerId,
         customPrompt,
+        mode = 'translation',
       }: {
         sourceText: string;
         targetText: string;
         providerId?: string;
         customPrompt?: string;
+        mode?: 'translation' | 'transcript';
       },
     ) => {
       try {
@@ -535,6 +550,34 @@ export function setupProofreadHandlers(): void {
         // 获取源语言和目标语言
         const sourceLanguage = userConfig.sourceLanguage || 'en';
         const targetLanguage = userConfig.targetLanguage || 'zh';
+        const glossaryResolution =
+          mode === 'translation' ? getActiveGlossaryResolution() : undefined;
+        if (glossaryResolution) {
+          const fingerprint = glossaryConflictFingerprint(
+            glossaryResolution.conflicts,
+          );
+          if (
+            singleOptimizeConflictFingerprints.get(event.sender) !== fingerprint
+          ) {
+            logGlossaryConflicts(
+              glossaryResolution.conflicts,
+              '校对页单条 AI 优化',
+            );
+            singleOptimizeConflictFingerprints.set(event.sender, fingerprint);
+          }
+        }
+        const glossaryMatches = glossaryResolution
+          ? matchGlossaryEntries(glossaryResolution.entries, [sourceText])
+          : [];
+        const glossarySelection = selectGlossaryPromptEntries(glossaryMatches);
+        const glossaryBlock = buildGlossaryPromptBlock(
+          glossarySelection.included,
+        );
+        logGlossaryMatches(
+          glossarySelection.included,
+          '校对页单条 AI 优化',
+          glossarySelection.omittedCount,
+        );
 
         // 根据是否有翻译内容选择不同的默认提示词
         const hasTranslation = targetText && targetText.trim();
@@ -596,8 +639,10 @@ Only respond with the translation, nothing else.`;
         // 调用翻译服务
         const optimizedProvider = {
           ...provider,
-          systemPrompt:
+          systemPrompt: injectGlossaryPromptBlock(
             'You are a professional subtitle translation optimizer. Provide improved translations only, no explanations.',
+            glossaryBlock,
+          ),
           useJsonMode: false,
           structuredOutput: 'disabled' as const,
         };
@@ -646,6 +691,7 @@ Only respond with the translation, nothing else.`;
         batchSize = 5,
         maxRetries = 2,
         batchId,
+        mode = 'translation',
       }: {
         subtitles: Array<{
           id: string;
@@ -658,6 +704,7 @@ Only respond with the translation, nothing else.`;
         batchSize?: number;
         maxRetries?: number;
         batchId?: string;
+        mode?: 'translation' | 'transcript';
       },
     ) => {
       const abortController = new AbortController();
@@ -710,6 +757,15 @@ Only respond with the translation, nothing else.`;
 
         const sourceLanguage = userConfig.sourceLanguage || 'en';
         const targetLanguage = userConfig.targetLanguage || 'zh';
+        const glossaryResolution =
+          mode === 'translation' ? getActiveGlossaryResolution() : undefined;
+        if (glossaryResolution) {
+          logGlossaryConflicts(
+            glossaryResolution.conflicts,
+            '校对页批量 AI 优化',
+          );
+        }
+        const glossaryEntries = glossaryResolution?.entries || [];
 
         // 构建默认批量优化提示词
         const defaultBatchPrompt = `You are a professional subtitle translator and proofreader. Optimize the following subtitle translations.
@@ -748,6 +804,20 @@ IMPORTANT: You MUST return a valid JSON object. Do NOT include any text before o
           }
           const batch = subtitles.slice(i, i + batchSize);
           const currentBatchIndex = Math.floor(i / batchSize) + 1;
+          const glossaryMatches = matchGlossaryEntries(
+            glossaryEntries,
+            batch.map((subtitle) => subtitle.sourceContent),
+          );
+          const glossarySelection =
+            selectGlossaryPromptEntries(glossaryMatches);
+          const glossaryBlock = buildGlossaryPromptBlock(
+            glossarySelection.included,
+          );
+          logGlossaryMatches(
+            glossarySelection.included,
+            `校对页批量 AI 优化 ${currentBatchIndex}/${totalBatches}`,
+            glossarySelection.omittedCount,
+          );
           let retryCount = 0;
           let batchSuccess = false;
 
@@ -797,8 +867,10 @@ IMPORTANT: You MUST return a valid JSON object. Do NOT include any text before o
               // 配置翻译器
               const optimizedProvider = {
                 ...provider,
-                systemPrompt:
+                systemPrompt: injectGlossaryPromptBlock(
                   'You are a professional subtitle optimizer. Output ONLY valid JSON. No explanations, no markdown, just the JSON object.',
+                  glossaryBlock,
+                ),
                 useJsonMode: true,
                 structuredOutput: 'disabled' as const,
               };

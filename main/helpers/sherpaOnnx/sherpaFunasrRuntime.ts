@@ -1,5 +1,5 @@
 import path from 'path';
-import { Worker } from 'worker_threads';
+import { utilityProcess, type UtilityProcess } from 'electron';
 import { logMessage } from '../storeManager';
 import { getExtraResourcesPath } from '../utils';
 import { getSherpaLibDir, isSherpaLibInstalled } from './sherpaLibPaths';
@@ -53,12 +53,14 @@ function workerPath(): string {
 }
 
 /**
- * 主侧 sherpa funasr 运行时：常驻一个 worker（worker 内 dlopen 原生库、缓存识别器），
- * 提供 prewarm / transcribe / cancel / dispose。模型加载与解码均在 worker 线程，
- * 不阻塞主/UI 线程——根治 Windows 首个 transcribe 卡 0%。
+ * 主侧 sherpa funasr 运行时：常驻一个 worker **进程**（Electron utilityProcess；
+ * worker 内 dlopen 原生库、缓存识别器），提供 prewarm / transcribe / cancel /
+ * dispose。模型加载与解码均在独立进程，不阻塞主/UI 线程——根治 Windows 首个
+ * transcribe 卡 0%；native 层崩溃只死子进程（在途请求 reject、下次自动重建），
+ * 不再带崩整个应用。
  */
 class SherpaFunasrRuntime {
-  private worker: Worker | null = null;
+  private worker: UtilityProcess | null = null;
   private seq = 0;
   private pending = new Map<
     string,
@@ -69,13 +71,15 @@ class SherpaFunasrRuntime {
     }
   >();
 
-  private ensureWorker(): Worker {
+  private ensureWorker(): UtilityProcess {
     if (this.worker) return this.worker;
     if (!isSherpaLibInstalled()) {
       throw new Error('sherpa native lib not installed');
     }
     const libDir = getSherpaLibDir();
-    const w = new Worker(workerPath(), {
+    const w = utilityProcess.fork(workerPath(), [], {
+      serviceName: 'smartsub-asr-worker',
+      stdio: 'pipe',
       env: {
         ...process.env,
         SHERPA_ONNX_LIB_DIR: libDir,
@@ -87,9 +91,25 @@ class SherpaFunasrRuntime {
       },
     });
     w.on('message', (msg: any) => this.onMessage(msg));
-    w.on('error', (e) => this.failAll(e));
+    // native 崩溃前的 stderr 是关键诊断线索（onnxruntime/sherpa 报错都走这里）。
+    w.stderr?.on('data', (d: Buffer) => {
+      const line = String(d).trim();
+      if (line) logMessage(`asr worker stderr: ${line}`, 'warning');
+    });
     w.on('exit', (code) => {
-      if (code !== 0) this.failAll(new Error(`sherpa worker exited ${code}`));
+      // dispose() 先置 this.worker=null 再 kill：此时的非零退出码是信号终止的
+      // 垃圾值，属预期停止（模型删除/导入前释放），不按异常处理。
+      const expected = this.worker !== w;
+      if (expected) {
+        this.failAll(new Error('本地转写引擎已释放（模型切换），请重试'));
+        return;
+      }
+      if (code !== 0) {
+        this.failAll(
+          new Error(`本地转写引擎异常退出（code ${code}），已自动重置，请重试`),
+        );
+        logMessage(`asr worker exited abnormally (code ${code})`, 'error');
+      }
       this.worker = null;
     });
     this.worker = w;
@@ -164,12 +184,33 @@ class SherpaFunasrRuntime {
     return { id, result };
   }
 
+  /**
+   * 语音降噪（gtcrn 随包模型）：读 wav → 降噪 → 写 wav（输出 16k）。
+   * 克隆参考音频的本地降噪可选项；复用常驻 worker（模型 ~500KB 常驻缓存）。
+   */
+  denoise(
+    audioFile: string,
+    denoiseModel: string,
+    outFile: string,
+  ): { id: string; result: Promise<void> } {
+    const w = this.ensureWorker();
+    const id = `d${++this.seq}`;
+    const result = new Promise<void>((resolve, reject) => {
+      this.pending.set(id, {
+        resolve: () => resolve(),
+        reject,
+      });
+    });
+    w.postMessage({ type: 'denoise', id, audioFile, denoiseModel, outFile });
+    return { id, result };
+  }
+
   cancel(id: string): void {
     this.worker?.postMessage({ type: 'cancel', id });
   }
 
   dispose(): void {
-    this.worker?.terminate();
+    this.worker?.kill();
     this.worker = null;
   }
 }

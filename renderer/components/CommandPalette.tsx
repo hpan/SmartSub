@@ -3,17 +3,20 @@ import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import { useTheme } from 'next-themes';
 import {
+  AudioLines,
+  BookOpenText,
+  Captions,
+  Clapperboard,
   Compass,
   Cpu,
-  Edit3,
-  Film,
   Github,
   HelpCircle,
+  Home,
   Keyboard,
   Languages,
-  MonitorPlay,
+  Mic,
   Moon,
-  PanelLeft,
+  PenLine,
   Plus,
   RefreshCw,
   ScrollText,
@@ -46,7 +49,6 @@ export default function CommandPalette({
   onOpenShortcuts,
   onOpenFaq,
   onOpenOnboarding,
-  onToggleSidebar,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -56,7 +58,6 @@ export default function CommandPalette({
   onOpenShortcuts: () => void;
   onOpenFaq: () => void;
   onOpenOnboarding: () => void;
-  onToggleSidebar: () => void;
 }) {
   const { t } = useTranslation('common');
   const router = useRouter();
@@ -93,13 +94,21 @@ export default function CommandPalette({
   };
 
   const nav = [
-    { href: 'home', label: t('tasks'), icon: MonitorPlay },
-    { href: 'proofread', label: t('subtitleProofread'), icon: Edit3 },
-    { href: 'subtitleMerge', label: t('subtitleMerge'), icon: Film },
-    { href: 'engines', label: t('enginesAndModels'), icon: Cpu },
-    { href: 'translation', label: t('translationServices'), icon: Languages },
+    { href: 'home', label: t('nav.launchpad'), icon: Home },
+    {
+      href: 'tasks/generate-translate',
+      label: t('nav.subtitles'),
+      icon: Captions,
+    },
+    { href: 'proofread', label: t('nav.proofread'), icon: PenLine },
+    { href: 'subtitleMerge', label: t('nav.compose'), icon: Clapperboard },
+    { href: 'dubbing', label: t('nav.dubbing'), icon: Mic },
+    { href: 'engines', label: t('nav.engines'), icon: Cpu },
+    { href: 'translation', label: t('nav.translation'), icon: Languages },
+    { href: 'glossary', label: t('nav.glossary'), icon: BookOpenText },
+    { href: 'ttsServices', label: t('nav.voices'), icon: AudioLines },
     { href: 'recent-tasks', label: t('cmd.recentTasks'), icon: ScrollText },
-    { href: 'settings', label: t('settings'), icon: Settings },
+    { href: 'settings', label: t('nav.settings'), icon: Settings },
   ];
 
   const newTasks = [
@@ -169,16 +178,6 @@ export default function CommandPalette({
           >
             {theme === 'light' ? <Moon /> : <Sun />}
             <span>{t('toggleTheme')}</span>
-          </CommandItem>
-          <CommandItem
-            value={`action ${t('sidebar.collapse')} ${t('sidebar.expand')}`}
-            onSelect={() => {
-              onToggleSidebar();
-              onOpenChange(false);
-            }}
-          >
-            <PanelLeft />
-            <span>{t('sidebar.collapse')}</span>
           </CommandItem>
           <CommandItem
             value={`action ${t('help.checkUpdates')}`}

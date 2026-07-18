@@ -33,8 +33,8 @@
   },
   {
     "id": "large-v3-turbo",
-    "hfRepo": "Systran/faster-whisper-large-v3-turbo",
-    "size": "~1.5GB",
+    "hfRepo": "dropbox-dash/faster-whisper-large-v3-turbo",
+    "size": "~1.6GB",
     "tier": "accurate",
     "speed": 3,
     "quality": 5
@@ -74,6 +74,7 @@
     "tier": "accurate",
     "speed": 4,
     "quality": 4,
+    "englishOnly": true,
     "distil": true
   }
 ]

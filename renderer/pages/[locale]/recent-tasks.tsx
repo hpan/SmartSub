@@ -105,6 +105,7 @@ export default function RecentTasksPage() {
   const getTypeFilterLabel = (value: 'all' | WorkItemType) => {
     if (value === 'all') return t('allTasks.typeAll');
     if (value === 'proofread') return t('card.proofread');
+    if (value === 'dubbing') return t('card.dubbing');
     const slug =
       value === 'generateAndTranslate'
         ? 'generate-translate'
@@ -153,7 +154,7 @@ export default function RecentTasksPage() {
 
   return (
     <div className="h-full overflow-auto">
-      <div className="mx-auto max-w-4xl px-6 py-10 space-y-6">
+      <div className="mx-auto max-w-5xl space-y-3 p-3">
         <Button
           variant="ghost"
           size="sm"

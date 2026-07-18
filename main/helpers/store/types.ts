@@ -1,15 +1,26 @@
 import { Provider, CustomParameterConfig } from '../../../types/provider';
 import type { AsrProvider } from '../../../types/asrProvider';
+import type { TtsProvider } from '../../../types/ttsProvider';
+import type { ClonedVoice } from '../../../types/voiceClone';
 import { ProofreadHistory, ProofreadTask } from '../../../types/proofread';
 import { IFiles, TaskProject } from '../../../types';
 import { WorkItem } from '../../../types/workItem';
 import type { TranscriptionEngine } from '../../../types/engine';
 import {
   GpuMode,
+  MacAccelMode,
   AddonLoadResultInfo,
   AddonLoadHistoryEntry,
 } from '../../../types/addon';
 import type { DownloadEndpointConfig } from '../../../types/downloadConfig';
+import type {
+  MergeOutputMode,
+  VideoQuality,
+  EncoderMode,
+  UserStylePreset,
+} from '../../../types/subtitleMerge';
+import type { TaskRecipe } from '../../../types/recipe';
+import type { Glossary } from '../../../types/glossary';
 
 export type LogEntry = {
   timestamp: number;
@@ -23,6 +34,10 @@ export type StoreType = {
   translationProviders: Provider[];
   /** 云端听写（在线 ASR）服务商实例列表（多实例，含凭据）。缺省未定义时按 [] 处理。 */
   asrProviders?: AsrProvider[];
+  /** 云端配音（TTS）服务商实例列表（语义对齐 asrProviders）。缺省未定义时按 [] 处理。 */
+  ttsProviders?: TtsProvider[];
+  /** 用户克隆音色（我的音色）列表。缺省未定义时按 [] 处理。 */
+  clonedVoices?: ClonedVoice[];
   userConfig: Record<string, any>;
   settings: {
     whisperCommand: string;
@@ -30,10 +45,12 @@ export type StoreType = {
     useLocalWhisper: boolean;
     builtinWhisperCommand: string;
     useCuda: boolean;
-    /** GPU 加速模式（取代 useCuda；useCuda 保留仅为回滚安全） */
+    /** GPU 加速模式（取代 useCuda；useCuda 保留仅为回滚安全；仅 win/linux 生效） */
     gpuMode?: GpuMode;
     /** gpuMode 迁移一次性通知标记：false=待通知，true=已通知 */
     gpuMigrationNotified?: boolean;
+    /** macOS(Apple Silicon) 转写加速方式：auto=优先 CoreML（缺省），metal=始终 Metal */
+    macAccelMode?: MacAccelMode;
     modelsPath: string;
     maxContext?: number;
     useCustomTempDir?: boolean;
@@ -73,6 +90,8 @@ export type StoreType = {
     qwenModelsPath?: string;
     /** fireRed 模型根目录覆盖；缺省回退 userData/models/firered */
     fireRedModelsPath?: string;
+    /** TTS(配音) 模型根目录覆盖；缺省回退 userData/models/tts */
+    ttsModelsPath?: string;
     /** FunASR(SenseVoice via sherpa-onnx) 推理 provider；P1 仅 cpu 落地，cuda/coreml 预留 */
     funasrProvider?: 'cpu' | 'cuda' | 'coreml';
     /** FunASR 逆文本归一化（数字/标点），默认开启 */
@@ -115,9 +134,10 @@ export type StoreType = {
     cloudUploadConsent?: boolean;
   };
   providerVersion?: number;
-  logs: LogEntry[];
   lastAddonLoadResult?: AddonLoadResultInfo;
   addonLoadHistory?: AddonLoadHistoryEntry[];
+  /** 已完成过 CoreML 首次编译（成功跑完一次转写）的模型名，用于「首次使用耗时」提示去重 */
+  coremlCompiledModels?: string[];
   customParameters?: Record<string, CustomParameterConfig>;
   proofreadHistories?: ProofreadHistory[]; // 旧版，保留兼容
   proofreadTasks?: ProofreadTask[]; // 新版批量任务
@@ -142,5 +162,20 @@ export type StoreType = {
    * 键=`sha1(压缩音频):服务商实例id:模型:语言`；任务完结/失效即删，写入超 72h 惰性过期。
    */
   gladiaPendingJobs?: Record<string, { id: string; createdAt: number }>;
+  /**
+   * 合成页输出偏好（跨重启记忆）。encoderMode 持久化为 hardware 但本会话
+   * 探测不可用时，UI 回落 CPU 显示且不改写存储值（换回有硬件的环境自动恢复）。
+   */
+  mergePreferences?: {
+    outputMode?: MergeOutputMode;
+    videoQuality?: VideoQuality;
+    encoderMode?: EncoderMode;
+  };
+  /** 用户保存的字幕样式预设（合成工作台「我的样式」，任务向导样式选择共用） */
+  mergeStylePresets?: UserStylePreset[];
+  /** 用户任务配方（内置配方为 renderer 代码常量，不落库） */
+  taskRecipes?: TaskRecipe[];
+  /** 全局翻译词库；按 order 排序，所有启用词库自动供 AI 翻译/优化读取。 */
+  glossaries?: Glossary[];
   [key: string]: any;
 };

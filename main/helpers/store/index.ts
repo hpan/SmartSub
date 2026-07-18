@@ -19,6 +19,7 @@ export const store = new Store<StoreType>({
       builtinWhisperCommand: defaultWhisperCommand,
       useCuda: true,
       gpuMode: 'auto' as const,
+      macAccelMode: 'auto' as const,
       modelsPath: path.join(app.getPath('userData'), 'whisper-models'),
       maxContext: -1,
       useCustomTempDir: false,
@@ -40,6 +41,13 @@ export const store = new Store<StoreType>({
       closeAction: 'smart' as const,
       closeHintShown: false,
     },
-    logs: [],
+    mergePreferences: {
+      outputMode: 'hardcode' as const,
+      videoQuality: 'original' as const,
+      encoderMode: 'cpu' as const,
+    },
+    mergeStylePresets: [],
+    taskRecipes: [],
+    glossaries: [],
   },
 });
