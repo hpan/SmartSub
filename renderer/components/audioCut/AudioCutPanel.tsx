@@ -808,6 +808,21 @@ export default function AudioCutPanel() {
               </span>
             </div>
           )}
+          {keyframes.length > 0 && (
+            <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <span className="text-yellow-500">▼</span>
+                关键帧: 共 {keyframes.length} 个
+              </span>
+              <span className="text-yellow-500/70">
+                开头: {keyframes.filter((kf) => kf < checkDuration).map((kf) => formatSeconds(Math.round(kf * 1000) / 1000)).slice(0, 5).join(', ')}
+                {keyframes.filter((kf) => kf < checkDuration).length > 5 ? ' ...' : ''}
+              </span>
+              <span className="text-yellow-500/70">
+                结尾: {keyframes.filter((kf) => kf > audioInfo.duration - checkDuration).map((kf) => formatSeconds(Math.round(kf * 1000) / 1000)).slice(-5).join(', ')}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

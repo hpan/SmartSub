@@ -77,15 +77,7 @@ function cutAudio(
     const cmd = ffmpeg(inputPath)
       .inputOptions('-ss', String(startTime))
       .duration(duration)
-      .outputOptions(
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-c:a',
-        'copy',
-        '-y',
-      )
+      .outputOptions('-c', 'copy', '-y')
       .on('start', (str) => {
         logMessage(`audio cut start: ${str}`, 'info');
       })
