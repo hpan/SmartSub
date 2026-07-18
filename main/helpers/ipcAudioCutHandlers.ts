@@ -647,7 +647,7 @@ ipcMain.handle(
             '-select_streams',
             'v:0',
             '-show_entries',
-            'frame=pict_type,pts_time',
+            'packet=pts_time,flags',
             '-of',
             'csv',
             filePath,
@@ -675,11 +675,11 @@ ipcMain.handle(
                 return;
               }
 
-              // 解析输出：frame,1.034,I → 取 pict_type=I 的 pts_time
+              // 解析输出：packet,0.000000,K_ → 取 pict_type=I 的 pts_time
               const keyframes: number[] = [];
               for (const line of stdout.split('\n')) {
                 const parts = line.trim().split(',');
-                if (parts.length >= 3 && parts[2] === 'I') {
+                if (parts.length >= 3 && parts[2] && parts[2].includes('K')) {
                   const t = parseFloat(parts[1]);
                   if (!isNaN(t) && t >= 0) {
                     keyframes.push(Math.round(t * 1000) / 1000); // 保留 3 位小数
