@@ -23,7 +23,14 @@ import {
   convertAlignment,
   backOpacityToAssAlpha,
 } from './assStyleBuilder';
-import { containsCJK, resolveBurnFontName } from './fontResolver';
+import {
+  containsCJK,
+  isLatinOnlyFont,
+  resolveMacCJKFont,
+  isMacResolvableCJKFont,
+  getPlatformCJKFont,
+  resolveBurnFontName,
+} from './fontResolver';
 
 // 设置 ffmpeg 路径
 const ffmpegPath = ffmpegStatic.replace('app.asar', 'app.asar.unpacked');
@@ -138,113 +145,6 @@ export function cleanupTempSubtitle(tmpPath: string): void {
 function pathNeedsSafeCopy(filePath: string): boolean {
   // 包含单引号、反斜杠（非路径分隔符）、冒号（非Windows盘符）等特殊字符
   return /['\[\];,]/.test(filePath);
-}
-
-// 纯拉丁字体（不含 CJK 字形）。中文字幕若用这些字体烧录，libass 找不到字形会渲染成
-// 豆腐块/乱码（issue: mac 中文烧录乱码）。命中且字幕含 CJK 时回退到平台 CJK 字体。
-const LATIN_ONLY_FONTS = new Set([
-  'arial',
-  'helvetica',
-  'helvetica neue',
-  'georgia',
-  'times new roman',
-  'verdana',
-  'roboto',
-  'impact',
-  'tahoma',
-  'courier new',
-]);
-
-/** 文本是否包含 CJK（中日韩）字符 */
-function containsCJK(text: string): boolean {
-  return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/.test(
-    text,
-  );
-}
-
-/** 选中字体是否为纯拉丁字体（无 CJK 字形） */
-function isLatinOnlyFont(fontName: string): boolean {
-  return LATIN_ONLY_FONTS.has((fontName || '').trim().toLowerCase());
-}
-
-/**
- * macOS 上「确有字体文件」的常见 CJK 字体（按优先级）。
- * 关键点：PingFang 在部分 macOS 上没有可被 fontconfig 索引的字体文件
- * （仅 CoreText 可见），libass 解析「PingFang SC」会回退到 Helvetica → 中文渲染成乱码。
- * 因此烧录前必须挑一个「文件确实存在」的 CJK 字体，按 family 名交给 libass。
- * family 名取自 libass/fontconfig 对相应文件的实际解析结果（已实测）。
- */
-const MAC_CJK_FONTS: Array<{ name: string; files: string[] }> = [
-  { name: 'PingFang SC', files: ['/System/Library/Fonts/PingFang.ttc'] },
-  {
-    name: 'Hiragino Sans GB',
-    files: ['/System/Library/Fonts/Hiragino Sans GB.ttc'],
-  },
-  {
-    name: 'Heiti SC',
-    files: [
-      '/System/Library/Fonts/STHeiti Medium.ttc',
-      '/System/Library/Fonts/STHeiti Light.ttc',
-    ],
-  },
-  {
-    name: 'Songti SC',
-    files: ['/System/Library/Fonts/Supplemental/Songti.ttc'],
-  },
-  {
-    name: 'Smiley Sans',
-    files: ['/Users/vangogh/Library/Fonts/SmileySans-Oblique.ttf'],
-  },
-  {
-    name: 'Arial Unicode MS',
-    files: ['/System/Library/Fonts/Supplemental/Arial Unicode.ttf'],
-  },
-];
-
-let cachedMacCJKFont: string | null = null;
-
-/** macOS：返回第一个字体文件确实存在的 CJK 字体名（结果缓存） */
-function resolveMacCJKFont(): string {
-  if (cachedMacCJKFont) return cachedMacCJKFont;
-  const found = MAC_CJK_FONTS.find((f) =>
-    f.files.some((p) => {
-      try {
-        return fs.existsSync(p);
-      } catch {
-        return false;
-      }
-    }),
-  );
-  cachedMacCJKFont = found?.name ?? 'Arial Unicode MS';
-  return cachedMacCJKFont;
-}
-
-/** 该字体在 macOS 上是否为「文件存在」的已知 CJK 字体（可被 libass 正常解析） */
-function isMacResolvableCJKFont(fontName: string): boolean {
-  const norm = (fontName || '').trim().toLowerCase();
-  const matched = MAC_CJK_FONTS.find((f) => f.name.toLowerCase() === norm);
-  return Boolean(
-    matched &&
-      matched.files.some((p) => {
-        try {
-          return fs.existsSync(p);
-        } catch {
-          return false;
-        }
-      }),
-  );
-}
-
-/** 按运行平台返回一个稳定可用的 CJK 字体名 */
-function getPlatformCJKFont(): string {
-  switch (process.platform) {
-    case 'darwin':
-      return resolveMacCJKFont();
-    case 'win32':
-      return 'Microsoft YaHei';
-    default:
-      return 'Noto Sans CJK SC';
-  }
 }
 
 // 备注：CJK 字体兜底逻辑已抽至 fontResolver.ts（烧录与 JASSUB 预览共用）。
