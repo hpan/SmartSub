@@ -433,6 +433,7 @@ export default function AudioCutPanel() {
                 startTime: Math.max(0, infoRes.data.duration - checkDuration),
                 endTime: infoRes.data.duration,
               }),
+              window.ipc.invoke('audioCut:detectKeyframes', { filePath }),
             ]);
 
           if (silenceRes.success) {
@@ -515,8 +516,26 @@ export default function AudioCutPanel() {
     setCutPoints((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
+  // 自动格式化时间输入：只输数字，自动插入冒号和点号
   const handlePointChange = useCallback((index: number, value: string) => {
-    setCutPoints((prev) => prev.map((v, i) => (i === index ? value : v)));
+    const digits = value.replace(/[^0-9]/g, '');
+    // 如果值已经包含分隔符（如从关键帧跳转设置），且不只是纯数字，直接使用
+    if (value.includes(':') && value !== digits) {
+      setCutPoints((prev) => prev.map((v, i) => (i === index ? value : v)));
+      return;
+    }
+    if (!digits) {
+      setCutPoints((prev) => prev.map((v, i) => (i === index ? '' : v)));
+      return;
+    }
+    // 自动格式化：HH:MM:SS.m（最多 7 位数字）
+    let formatted = '';
+    for (let d = 0; d < Math.min(digits.length, 7); d++) {
+      if (d === 2 || d === 4) formatted += ':';
+      if (d === 6) formatted += '.';
+      formatted += digits[d];
+    }
+    setCutPoints((prev) => prev.map((v, i) => (i === index ? formatted : v)));
   }, []);
 
   // 播放/暂停
