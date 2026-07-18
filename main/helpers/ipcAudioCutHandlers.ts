@@ -622,3 +622,65 @@ ipcMain.handle(
 ipcMain.handle(
   'audioCut:detectKeyframes',
   async (_event, { filePath }: { filePath: string }) => {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: '文件不存在' };
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.mts'];
+      if (!videoExts.includes(ext)) {
+        return { success: true, data: { keyframes: [] } };
+      }
+
+      logMessage(`[audioCut] detecting keyframes: ${filePath}`, 'info');
+
+      const { spawn } = require('child_process');
+      const args = [
+        '-select_streams', 'v:0',
+        '-show_entries', 'packet=pts_time,flags',
+        '-of', 'csv',
+        filePath,
+      ];
+
+      return new Promise((resolve) => {
+        const proc = spawn(ffprobePath, args);
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+        proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+
+        proc.on('close', (code: number) => {
+          if (code !== 0) {
+            logMessage(`[audioCut] keyframe detect error: ${stderr.slice(-200)}`, 'error');
+            resolve({ success: false, error: '检测关键帧失败' });
+            return;
+          }
+
+          const keyframes: number[] = [];
+          for (const line of stdout.split('\n')) {
+            const parts = line.trim().split(',');
+            if (parts.length >= 3 && parts[2] && parts[2].includes('K')) {
+              const t = parseFloat(parts[1]);
+              if (!isNaN(t) && t >= 0) {
+                keyframes.push(Math.round(t * 1000) / 1000);
+              }
+            }
+          }
+
+          logMessage(`[audioCut] found ${keyframes.length} keyframes`, 'info');
+          resolve({ success: true, data: { keyframes } });
+        });
+
+        proc.on('error', (err: Error) => {
+          logMessage(`[audioCut] keyframe detect error: ${err}`, 'error');
+          resolve({ success: false, error: `检测关键帧失败: ${err.message}` });
+        });
+      });
+    } catch (error) {
+      logMessage(`[audioCut] keyframe detect error: ${error}`, 'error');
+      return { success: false, error: `检测关键帧失败: ${error}` };
+    }
+  },
+);
