@@ -75,9 +75,7 @@ function cutAudio(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const cmd = ffmpeg(inputPath)
-      .inputOptions('-ss', String(startTime))
-      .duration(duration)
-      .outputOptions('-c', 'copy', '-y')
+      .outputOptions('-ss', String(startTime), '-t', String(duration), '-c', 'copy', '-y')
       .on('start', (str) => {
         logMessage(`audio cut start: ${str}`, 'info');
       })
