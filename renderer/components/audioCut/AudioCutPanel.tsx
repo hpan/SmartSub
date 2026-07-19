@@ -677,9 +677,29 @@ export default function AudioCutPanel() {
     }
   }, [audioInfo, cutPoints]);
 
+  const [extracting, setExtracting] = useState(false);
+
   const handleOpenFolder = useCallback((filePath: string) => {
     window.ipc.invoke('audioCut:openFolder', { filePath });
   }, []);
+
+  const handleExtractAudio = useCallback(async () => {
+    if (!audioInfo) return;
+    setExtracting(true);
+    try {
+      const res = await window.ipc.invoke('audioCut:extractAudio', {
+        filePath: audioInfo.path,
+      });
+      if (res.success) {
+        toast.success('音频分离完成');
+        handleOpenFolder(res.data.outputPath);
+      } else {
+        toast.error(res.error);
+      }
+    } finally {
+      setExtracting(false);
+    }
+  }, [audioInfo, handleOpenFolder]);
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-auto p-4">
@@ -994,24 +1014,41 @@ export default function AudioCutPanel() {
 
       {/* 操作按钮 */}
       {audioInfo && (
-        <Button
-          onClick={handleCut}
-          disabled={cutting || cutPoints.every((c) => !c.trim())}
-          className="w-full gap-2"
-        >
-          {cutting ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              裁切中...
-              {progress && ` (${progress.current}/${progress.total})`}
-            </>
-          ) : (
-            <>
-              <Scissors className="h-4 w-4" />
-              开始裁切
-            </>
+        <div className="flex gap-2">
+          <Button
+            onClick={handleCut}
+            disabled={cutting || extracting || cutPoints.every((c) => !c.trim())}
+            className="flex-1 gap-2"
+          >
+            {cutting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                裁切中...
+                {progress && ` (${progress.current}/${progress.total})`}
+              </>
+            ) : (
+              <>
+                <Scissors className="h-4 w-4" />
+                开始裁切
+              </>
+            )}
+          </Button>
+          {audioInfo.format.match(/MP4|MKV|AVI|MOV|WEBM|TS/i) && (
+            <Button
+              variant="outline"
+              onClick={handleExtractAudio}
+              disabled={cutting || extracting}
+              className="gap-2"
+            >
+              {extracting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <FileAudio className="h-4 w-4" />
+              )}
+              仅分离音频
+            </Button>
           )}
-        </Button>
+        </div>
       )}
 
       {/* 进度条 */}

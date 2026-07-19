@@ -627,6 +627,42 @@ ipcMain.handle(
   },
 );
 
+  // 仅分离音频（不裁切，完整提取）
+  ipcMain.handle(
+    'audioCut:extractAudio',
+    async (_event, { filePath }: { filePath: string }) => {
+      try {
+        if (!fs.existsSync(filePath)) {
+          return { success: false, error: '文件不存在' };
+        }
+
+        const ext = path.extname(filePath);
+        const base = path.basename(filePath, ext);
+        const dir = path.dirname(filePath);
+        const outFile = path.join(dir, `${base}.m4a`);
+
+        logMessage(`[audioCut] extracting audio: ${filePath}`, 'info');
+
+        return new Promise((resolve) => {
+          ffmpeg(filePath)
+            .outputOptions('-vn', '-c:a', 'copy', '-y')
+            .on('end', () => {
+              logMessage(`[audioCut] audio extracted: ${outFile}`, 'info');
+              resolve({ success: true, data: { outputPath: outFile } });
+            })
+            .on('error', (err) => {
+              logMessage(`[audioCut] extract audio error: ${err}`, 'error');
+              resolve({ success: false, error: `分离音频失败: ${err.message}` });
+            })
+            .save(outFile);
+        });
+      } catch (error) {
+        logMessage(`[audioCut] extract audio error: ${error}`, 'error');
+        return { success: false, error: `分离音频失败: ${error}` };
+      }
+    },
+  );
+
 // 检测视频关键帧位置
 ipcMain.handle(
   'audioCut:detectKeyframes',
