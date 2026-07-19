@@ -165,7 +165,7 @@ export function setupAudioCutHandlers(mainWindow: BrowserWindow) {
     'audioCut:cut',
     async (
       _event,
-      { filePath, cutPoints }: { filePath: string; cutPoints: number[] },
+      { filePath, cutPoints, extractAudio }: { filePath: string; cutPoints: number[]; extractAudio?: boolean },
     ) => {
       try {
         if (!fs.existsSync(filePath)) {
@@ -186,6 +186,9 @@ export function setupAudioCutHandlers(mainWindow: BrowserWindow) {
         const results: CutResult[] = [];
 
         activeFfmpegCommands = [];
+
+        const videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.mts'];
+        const isVideo = videoExts.includes(ext.toLowerCase());
 
         for (let i = 0; i < boundaries.length - 1; i++) {
           const start = boundaries[i];
@@ -216,6 +219,22 @@ export function setupAudioCutHandlers(mainWindow: BrowserWindow) {
             startTime: start,
             endTime: end,
           });
+
+          // 如果需要分离音频，从刚裁切的视频片段中提取音频
+          if (extractAudio && isVideo) {
+            const audioFile = path.join(
+              dir,
+              `${base}_part${String(i + 1).padStart(2, '0')}.m4a`,
+            );
+            await new Promise<void>((resolveAudio, rejectAudio) => {
+              ffmpeg(outFile)
+                .outputOptions('-vn', '-c:a', 'copy', '-y')
+                .on('end', () => resolveAudio())
+                .on('error', (err) => rejectAudio(err))
+                .save(audioFile);
+            });
+            logMessage(`[audioCut] audio extracted: ${audioFile}`, 'info');
+          }
         }
 
         return { success: true, data: results };

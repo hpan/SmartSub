@@ -355,6 +355,7 @@ export default function AudioCutPanel() {
   const [audioInfo, setAudioInfo] = useState<AudioInfo | null>(null);
   const [cutPoints, setCutPoints] = useState<string[]>(['']);
   const [cutting, setCutting] = useState(false);
+  const [extractAudio, setExtractAudio] = useState(false);
   const [progress, setProgress] = useState<{
     current: number;
     total: number;
@@ -972,6 +973,22 @@ export default function AudioCutPanel() {
               将生成 {cutPoints.filter((c) => c.trim()).length + 1} 个片段
             </div>
           )}
+        </div>
+      )}
+
+      {/* 同时分离音频 */}
+      {audioInfo && audioInfo.format.match(/MP4|MKV|AVI|MOV|WEBM|TS/i) && (
+        <div className="flex items-center gap-2 px-1">
+          <input
+            type="checkbox"
+            id="extractAudio"
+            checked={extractAudio}
+            onChange={(e) => setExtractAudio(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300"
+          />
+          <label htmlFor="extractAudio" className="text-sm text-muted-foreground cursor-pointer">
+            同时分离音频（从视频中提取 .m4a 音频文件）
+          </label>
         </div>
       )}
 
