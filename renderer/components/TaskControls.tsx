@@ -7,6 +7,7 @@ import { useTranslation } from 'next-i18next';
 import type { TaskTypeDef } from 'lib/taskTypes';
 import { getFileStages, isFileDone } from './tasks/stageUtils';
 import { useHotkeys } from 'hooks/useHotkeys';
+import { isProviderConfigured } from 'lib/providerUtils';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,6 +27,8 @@ interface TaskControlsProps {
   className?: string;
   /** 可选：状态变化时上抛（任务页用于联动重试按钮/完成横幅） */
   onStatusChange?: (status: string) => void;
+  /** 任务成功派发时回传本轮配置；需要固定快照的任务可立即切换为只读展示。 */
+  onTaskDispatched?: (snapshot: any) => void;
   autoStart?: boolean;
 }
 
@@ -38,6 +41,7 @@ const TaskControls = ({
   projectId,
   className,
   onStatusChange,
+  onTaskDispatched,
   autoStart,
 }: TaskControlsProps) => {
   const [taskStatus, setTaskStatusState] = useState('idle');
@@ -46,7 +50,7 @@ const TaskControls = ({
   // 云端听写「上传确认」：首次开跑云任务时弹确认，勾选不再提醒后写入 settings。
   const [cloudConsentOpen, setCloudConsentOpen] = useState(false);
   const pendingCloudFilesRef = useRef<any[] | null>(null);
-  const { t } = useTranslation(['home', 'common']);
+  const { t } = useTranslation(['home', 'common', 'tasks']);
 
   const setTaskStatus = (status: string) => {
     setTaskStatusState(status);
@@ -120,6 +124,33 @@ const TaskControls = ({
       toast.error(t('home:selectModelFirst'));
       return;
     }
+    // AI 精修：与向导 D9 一致——跟随不可解析 / 显式服务商失效时阻断开始。
+    if (
+      needsTranscription &&
+      (formData?.aiSegmentation === true || formData?.aiCorrection === true)
+    ) {
+      const providers =
+        (await window?.ipc?.invoke('getTranslationProviders')) || [];
+      const refineSetting = formData?.refineProvider || 'follow-translation';
+      if (refineSetting === 'follow-translation') {
+        const translateOn =
+          Boolean(formData?.translateProvider) &&
+          formData?.translateProvider !== '-1';
+        const tp = providers.find(
+          (p: any) => p.id === formData?.translateProvider,
+        );
+        if (!translateOn || !tp?.isAi) {
+          toast.error(t('tasks:wizard.blockRefineFollow'));
+          return;
+        }
+      } else {
+        const rp = providers.find((p: any) => p.id === refineSetting);
+        if (!rp?.isAi || !isProviderConfigured(rp)) {
+          toast.error(t('tasks:wizard.blockRefineProviderInvalid'));
+          return;
+        }
+      }
+    }
     // 云端听写：音频会上传到第三方端点，首次开跑前弹确认（隐私/成本护栏）。
     if (
       typeDef.needsModel &&
@@ -154,6 +185,7 @@ const TaskControls = ({
       });
     }
     setTaskStatus('running');
+    onTaskDispatched?.(formData);
     window?.ipc?.send('handleTask', {
       files: pendingFiles,
       formData,

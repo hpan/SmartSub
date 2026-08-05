@@ -13,6 +13,7 @@ import {
   AddonLoadHistoryEntry,
 } from '../../../types/addon';
 import type { DownloadEndpointConfig } from '../../../types/downloadConfig';
+import type { CookieProfileMeta } from '../../../types/download';
 import type {
   MergeOutputMode,
   VideoQuality,
@@ -21,6 +22,7 @@ import type {
 } from '../../../types/subtitleMerge';
 import type { TaskRecipe } from '../../../types/recipe';
 import type { Glossary } from '../../../types/glossary';
+import type { CustomLanguage } from '../../../types/language';
 
 export type LogEntry = {
   timestamp: number;
@@ -42,16 +44,34 @@ export type StoreType = {
   settings: {
     whisperCommand: string;
     language: string;
+    /** User-defined language codes shown alongside the built-in task languages. */
+    customLanguages?: CustomLanguage[];
     useLocalWhisper: boolean;
     builtinWhisperCommand: string;
     useCuda: boolean;
     /** GPU 加速模式（取代 useCuda；useCuda 保留仅为回滚安全；仅 win/linux 生效） */
     gpuMode?: GpuMode;
+    /**
+     * NVIDIA GPU UUID selected for CUDA engines. Empty/undefined keeps the
+     * system default. UUID is machine-local and intentionally not exported.
+     */
+    selectedCudaDevice?: string;
     /** gpuMode 迁移一次性通知标记：false=待通知，true=已通知 */
     gpuMigrationNotified?: boolean;
     /** macOS(Apple Silicon) 转写加速方式：auto=优先 CoreML（缺省），metal=始终 Metal */
     macAccelMode?: MacAccelMode;
-    modelsPath: string;
+    /**
+     * 统一存储根目录（Issue #388）。设置后 6 个模型目录与临时目录按
+     * 「引擎单独覆盖 > storageRoot/<既有默认子目录名> > userData 默认」解析，
+     * 见 storagePaths.ts。空串/undefined = 未设置。
+     */
+    storageRoot?: string;
+    /**
+     * whisper.cpp(ggml) 模型目录单独覆盖；缺省跟随 storageRoot / userData。
+     * 注意：曾在 store defaults 中写死绝对默认路径（被动持久化），启动时对
+     * 等于出厂默认的持久化值做归一化删除（ipcStoreHandlers）。
+     */
+    modelsPath?: string;
     maxContext?: number;
     useCustomTempDir?: boolean;
     customTempDir?: string;
@@ -90,6 +110,8 @@ export type StoreType = {
     qwenModelsPath?: string;
     /** fireRed 模型根目录覆盖；缺省回退 userData/models/firered */
     fireRedModelsPath?: string;
+    /** NVIDIA Parakeet 模型根目录覆盖；缺省回退 userData/models/parakeet */
+    parakeetModelsPath?: string;
     /** TTS(配音) 模型根目录覆盖；缺省回退 userData/models/tts */
     ttsModelsPath?: string;
     /** FunASR(SenseVoice via sherpa-onnx) 推理 provider；P1 仅 cpu 落地，cuda/coreml 预留 */
@@ -116,6 +138,10 @@ export type StoreType = {
     fireRedProvider?: 'cpu' | 'cuda';
     /** FireRedASR-AED 解码线程数，默认 2 */
     fireRedNumThreads?: number;
+    /** NVIDIA Parakeet TDT(sherpa-onnx) 推理 provider */
+    parakeetProvider?: 'cpu' | 'cuda';
+    /** NVIDIA Parakeet TDT 解码线程数，默认 2 */
+    parakeetNumThreads?: number;
     /** 全局网络代理模式（none=直连；custom=手动 URL） */
     proxyMode?: 'none' | 'custom';
     /** custom 模式的代理 URL，如 http://user:pass@host:port */
@@ -126,6 +152,16 @@ export type StoreType = {
     downloadEndpoints?: Partial<DownloadEndpointConfig>;
     /** 任务列表视图：list=列表，grid=网格（全局统一，跨重启保留） */
     taskViewMode?: 'list' | 'grid';
+    /** 在线视频下载：保存目录（记忆上次使用值） */
+    videoDownloadSavePath?: string;
+    /** 在线视频下载：清晰度档位 */
+    videoDownloadQuality?: 'best' | '1080p' | '720p';
+    /** 在线视频下载：引擎选择（auto=按域名路由） */
+    videoDownloadEngine?: 'auto' | 'yt-dlp' | 'lux';
+    /** 在线视频下载：并发数（1-5，默认 2） */
+    videoDownloadConcurrency?: number;
+    /** 在线视频下载：站点 Cookie 档案元数据（内容单独落盘 userData/downloader-cookies/） */
+    videoDownloadCookieProfiles?: CookieProfileMeta[];
     /** 关闭窗口行为：smart=有任务转后台/空闲退出，background=始终后台，quit=始终退出（仅 macOS 生效，Win/Linux 固定兜底） */
     closeAction?: 'smart' | 'background' | 'quit';
     /** 首次「转入后台」提示是否已展示（勾「不再提示」后置 true） */

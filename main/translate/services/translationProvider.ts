@@ -3,6 +3,7 @@ import {
   TranslationResult,
   Subtitle,
   TranslatorFunction,
+  TranslationConfig,
 } from '../types';
 import { handleAIBatchTranslation } from './ai';
 import { handleAPIBatchTranslation } from './api';
@@ -24,6 +25,7 @@ import {
   niutransTranslator,
   tencentTranslator,
   xunfeiTranslator,
+  qwenMtTranslator,
 } from '../../service';
 import { DEFAULT_BATCH_SIZE } from '../constants';
 import { getTaskSignal } from '../../helpers/taskContext';
@@ -57,6 +59,7 @@ export const TRANSLATOR_MAP = {
   niutrans: niutransTranslator,
   tencent: tencentTranslator,
   xunfei: xunfeiTranslator,
+  qwenMt: qwenMtTranslator,
 } as const;
 
 export async function translateWithProvider(
@@ -69,11 +72,16 @@ export async function translateWithProvider(
   onTranslationResult?: (results: TranslationResult[]) => Promise<void>,
   maxRetries: number = 0,
   useGlossary: boolean = true,
+  onResponseMeta?: TranslationConfig['onResponseMeta'],
 ): Promise<TranslationResult[] | string[]> {
+  const supportsGlossary = provider.isAi || provider.type === 'qwenMt';
   const glossaryResolution =
-    provider.isAi && useGlossary ? getActiveGlossaryResolution() : undefined;
+    supportsGlossary && useGlossary ? getActiveGlossaryResolution() : undefined;
   if (glossaryResolution) {
-    logGlossaryConflicts(glossaryResolution.conflicts, 'AI 翻译');
+    logGlossaryConflicts(
+      glossaryResolution.conflicts,
+      provider.type === 'qwenMt' ? 'Qwen-MT 翻译' : 'AI 翻译',
+    );
   }
   const glossaryEntries = glossaryResolution?.entries;
   const config = {
@@ -83,6 +91,7 @@ export async function translateWithProvider(
     translator,
     glossaryEntries,
     signal: getTaskSignal(),
+    onResponseMeta,
   };
 
   logMessage(

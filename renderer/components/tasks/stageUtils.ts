@@ -1,10 +1,14 @@
-import { isSubtitleFile } from 'lib/utils';
-import type { TaskTypeDef } from 'lib/taskTypes';
+import { isSubtitleFile } from '../../lib/utils';
+import type { TaskTypeDef } from '../../lib/taskTypes';
+import { isSpeakerDiarizationStandardTaskContext } from '../../../types/speakerDiarization';
 
 export type StageKey =
   | 'extractAudio'
   | 'extractSubtitle'
+  | 'refineSubtitle'
+  | 'manuscriptMatch'
   | 'translateSubtitle'
+  | 'speakerDiarization'
   | 'dubbing'
   | 'composeVideo';
 export type StageStatus = 'pending' | 'loading' | 'done' | 'error';
@@ -31,9 +35,36 @@ export function getFileStages(
   if (!subtitleInput && !hasProvidedSubtitle) {
     stages.push({ key: 'extractAudio', labelKey: 'stage.extract' });
     stages.push({ key: 'extractSubtitle', labelKey: 'stage.transcribe' });
+    // AI 字幕精修：配置快照声明开启，或文件上已有阶段状态（旧记录无该阶段不渲染）
+    if (
+      formData?.aiSegmentation === true ||
+      formData?.aiCorrection === true ||
+      file?.refineSubtitle !== undefined
+    ) {
+      stages.push({ key: 'refineSubtitle', labelKey: 'stage.refine' });
+    }
+    if (formData?.manuscriptPath || file?.manuscriptMatch !== undefined) {
+      stages.push({
+        key: 'manuscriptMatch',
+        labelKey: 'stage.manuscript',
+      });
+    }
   }
   if (typeDef.hasTranslate && formData?.translateProvider !== '-1') {
     stages.push({ key: 'translateSubtitle', labelKey: 'stage.translate' });
+  }
+  // 角色分离是标准转写任务的独立后处理阶段：翻译之后、任何附加阶段之前。
+  if (
+    !subtitleInput &&
+    !hasProvidedSubtitle &&
+    isSpeakerDiarizationStandardTaskContext(formData) &&
+    (formData?.speakerDiarization === true ||
+      file?.speakerDiarization !== undefined)
+  ) {
+    stages.push({
+      key: 'speakerDiarization',
+      labelKey: 'stage.speakerDiarization',
+    });
   }
   // 附加阶段：配置快照声明，或文件上已有阶段状态（快照缺失时兜底）
   if (formData?.dub || file?.dubbing !== undefined) {
@@ -179,12 +210,46 @@ export function getFileError(file: any, stages: StageDef[]): string {
   return '';
 }
 
-/** 校对解锁条件（沿用旧 TaskList 逻辑） */
-export function isProofreadReady(file: any, typeDef: TaskTypeDef): boolean {
-  if (typeDef.taskType === 'generateOnly') {
-    return file?.extractSubtitle === 'done';
+/** 已完成阶段仍可携带非阻断 warning（例如 metadata 持久化失败）。 */
+export function getFileWarning(file: any, stages: StageDef[]): string {
+  for (const stage of stages) {
+    if (
+      getStageStatus(file, stage.key) === 'done' &&
+      file?.[`${stage.key}Error`]
+    ) {
+      return file[`${stage.key}Error`];
+    }
   }
-  return file?.translateSubtitle === 'done';
+  return '';
+}
+
+/** 校对解锁条件（沿用旧 TaskList 逻辑） */
+export function isProofreadReady(
+  file: any,
+  typeDef: TaskTypeDef,
+  formData?: any,
+): boolean {
+  const stages = getFileStages(file, typeDef, formData);
+  if (typeDef.taskType === 'generateOnly') {
+    if (file?.extractSubtitle !== 'done') return false;
+    // 精修/文稿匹配会改写 srtFile：在轨时须全部完成，避免校对读到旧内容后被覆盖。
+    for (const key of ['refineSubtitle', 'manuscriptMatch'] as const) {
+      if (stages.some((stage) => stage.key === key) && file?.[key] !== 'done') {
+        return false;
+      }
+    }
+  } else if (file?.translateSubtitle !== 'done') {
+    return false;
+  }
+
+  // 角色分离会在 sidecar 落盘前保持 loading；必须等 done 才能进入校对。
+  if (
+    stages.some((s) => s.key === 'speakerDiarization') &&
+    file?.speakerDiarization !== 'done'
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export type ProofreadUnavailableReason = 'txt';
@@ -234,9 +299,13 @@ export function getProofreadUnavailableReason(
   return null;
 }
 
-export function canProofreadFile(file: any, typeDef: TaskTypeDef): boolean {
+export function canProofreadFile(
+  file: any,
+  typeDef: TaskTypeDef,
+  formData?: any,
+): boolean {
   return (
-    isProofreadReady(file, typeDef) &&
+    isProofreadReady(file, typeDef, formData) &&
     getProofreadUnavailableReason(file, typeDef) === null
   );
 }

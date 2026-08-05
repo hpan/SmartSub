@@ -4,7 +4,7 @@
  * 替代可编辑的 InlineConfigBar——避免全局配置与本任务无关却可改的误导。
  */
 import React, { useMemo } from 'react';
-import { AudioLines, Diamond, Film, Lock } from 'lucide-react';
+import { AudioLines, Diamond, FileText, Film, Lock, Users } from 'lucide-react';
 import {
   Tooltip,
   TooltipContent,
@@ -14,7 +14,11 @@ import {
 import { isSubtitleFile } from 'lib/utils';
 import type { TaskTypeDef } from 'lib/taskTypes';
 import { useTtsEngineOptions } from 'hooks/useTtsEngineOptions';
+import { useCustomLanguages } from 'hooks/useCustomLanguages';
 import { useTranslation } from 'next-i18next';
+import { getCustomLanguageName } from '../../../types/language';
+import { isSpeakerDiarizationStandardTaskContext } from '../../../types/speakerDiarization';
+import { isTaskSnapshotTranslationEnabled } from '../../../types/taskSnapshot';
 
 interface Provider {
   id: string;
@@ -59,6 +63,7 @@ const SnapshotConfigBar: React.FC<SnapshotConfigBarProps> = ({
   const { t: tHome } = useTranslation('home');
   const { t: tCommon } = useTranslation('common');
   const { engineOptions } = useTtsEngineOptions();
+  const customLanguages = useCustomLanguages();
 
   // 是否存在真正要转写的文件（字幕输入/配对自带字幕的都跳过听写）
   const needsTranscription = files.length
@@ -68,12 +73,16 @@ const SnapshotConfigBar: React.FC<SnapshotConfigBarProps> = ({
       )
     : typeDef.accepts === 'media';
 
-  const translateOn =
-    Boolean(snapshot?.translateProvider) && snapshot.translateProvider !== '-1';
+  const translateOn = isTaskSnapshotTranslationEnabled(
+    snapshot,
+    typeDef.hasTranslate,
+  );
 
   const languageLabel = (value?: string) => {
     if (!value) return '';
     if (value === 'auto') return tHome('autoRecognition');
+    const customName = getCustomLanguageName(value, customLanguages);
+    if (customName) return `${customName} (${value})`;
     return tCommon(`language.${value}`, { defaultValue: value });
   };
 
@@ -166,6 +175,27 @@ const SnapshotConfigBar: React.FC<SnapshotConfigBarProps> = ({
     return list;
   }, [snapshot, t]);
 
+  // AI 字幕精修（openspec: add-ai-subtitle-refine）：开启的遍 + 解析后的服务商
+  const refineValue = useMemo(() => {
+    const seg = snapshot?.aiSegmentation === true;
+    const corr = snapshot?.aiCorrection === true;
+    if (!seg && !corr) return '';
+    const parts: string[] = [];
+    if (seg) parts.push(t('refine.summary.segmentation'));
+    if (corr) parts.push(t('refine.summary.correction'));
+    const setting = snapshot?.refineProvider || 'follow-translation';
+    const target =
+      setting === 'follow-translation'
+        ? providers.find((p) => p.id === snapshot?.translateProvider)
+        : providers.find((p) => p.id === setting);
+    if (target?.name) {
+      parts.push(
+        tCommon(`provider.${target.name}`, { defaultValue: target.name }),
+      );
+    }
+    return parts.join(' · ');
+  }, [snapshot, providers, t, tCommon]);
+
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border bg-muted/30 px-3 py-2">
       <TooltipProvider>
@@ -183,6 +213,52 @@ const SnapshotConfigBar: React.FC<SnapshotConfigBarProps> = ({
 
       {needsTranscription && modelValue && (
         <SummaryItem label={t('configBar.model')} value={modelValue} />
+      )}
+
+      {needsTranscription && refineValue && (
+        <SummaryItem label={t('stage.refine')} value={refineValue} />
+      )}
+
+      {needsTranscription &&
+        snapshot?.speakerDiarization === true &&
+        isSpeakerDiarizationStandardTaskContext(snapshot) && (
+          <SummaryItem
+            label={t('speakerDiarization.summaryLabel')}
+            value={
+              <span className="flex items-center gap-1">
+                <Users className="h-3 w-3 flex-none text-muted-foreground" />
+                {snapshot?.speakerDiarizationCount >= 2
+                  ? t('speakerDiarization.summaryKnown', {
+                      count: snapshot.speakerDiarizationCount,
+                    })
+                  : t('speakerDiarization.summaryAuto')}
+                {' · '}
+                {t(
+                  snapshot?.speakerDiarizationEmbedInSubtitle === true
+                    ? 'speakerDiarization.summaryEmbedded'
+                    : 'speakerDiarization.summaryMetadataOnly',
+                )}
+              </span>
+            }
+          />
+        )}
+
+      {needsTranscription && snapshot?.manuscriptPath && (
+        <SummaryItem
+          label={t('manuscript.label')}
+          value={
+            <span
+              className="flex min-w-0 items-center gap-1"
+              title={snapshot.manuscriptPath}
+            >
+              <FileText className="h-3 w-3 flex-none text-muted-foreground" />
+              <span className="truncate">
+                {snapshot.manuscriptName ||
+                  String(snapshot.manuscriptPath).split(/[\\/]/).pop()}
+              </span>
+            </span>
+          }
+        />
       )}
 
       {snapshot?.sourceLanguage && (

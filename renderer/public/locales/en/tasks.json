@@ -85,6 +85,8 @@
     "blockVideoNeedsMedia": "Final video needs video input — uncheck it or add video files",
     "blockUnpairedMedia": "{{count}} video(s) have no subtitle paired — pick one on the video row, add files, or remove them",
     "blockNoGoal": "Pick at least one goal",
+    "blockRefineFollow": "AI refine cannot follow the translation service (translation is off or not an AI provider) — open Segmentation & Refine in the toolbar and pick a provider explicitly",
+    "blockRefineProviderInvalid": "The selected AI refine provider is unavailable (missing or not configured) — pick another one",
     "goConfigure": "Configure",
     "readyHint": "Ready: {{count}} file(s) will be processed automatically",
     "clearFiles": "Clear list",
@@ -111,6 +113,30 @@
     "provider": "Translation service",
     "style": "Output content",
     "format": "Subtitle format"
+  },
+  "manuscript": {
+    "label": "Reference script",
+    "select": "Choose TXT / Markdown",
+    "clear": "Clear reference script",
+    "hint": "Optional. Matches the script in order after transcription, replaces only high-confidence text, and always keeps the ASR timeline.",
+    "selected": "Reference script selected: {{name}}",
+    "cleared": "Reference script cleared",
+    "stageSummary": "Script matched {{replaced}}/{{total}} cues, {{confidence}}% average confidence",
+    "stageWarning": "Script matching safely fell back: {{reason}}",
+    "error": {
+      "unsupported": "Only TXT, MD, or Markdown reference scripts are supported",
+      "notFound": "The reference script no longer exists",
+      "notFile": "The selected item is not a file",
+      "tooLarge": "The reference script must be 1 MB or smaller",
+      "tooComplex": "The reference script has too much matchable or fragmented text",
+      "empty": "The reference script contains no matchable text",
+      "invalidEncoding": "The script encoding is unsupported; use UTF-8, UTF-16, GBK, or GB18030",
+      "unreadable": "The reference script could not be read",
+      "noCues": "The source subtitle has no timed cues to match",
+      "noMatch": "No match met the safety threshold; the original transcription was kept",
+      "timeline": "Timeline validation failed; the original transcription was kept",
+      "processing": "The script could not be processed; the original transcription was kept"
+    }
   },
   "notConfigured": " (not configured)",
   "providerGroup": {
@@ -144,7 +170,7 @@
       "title": "Custom",
       "desc": "Manually tune context length, VAD, repetition reduction and other low-level parameters.",
       "sectionTitle": "Custom parameters",
-      "sherpaNote": "For the current engine (FunASR / Qwen / FireRed), VAD is always on and there is no context-length / repetition concept. To fine-tune VAD sensitivity, use the Settings page."
+      "sherpaNote": "For the current engine (FunASR / Qwen / FireRed / Parakeet), VAD is always on and there is no context-length / repetition concept. To fine-tune VAD sensitivity, use the Settings page."
     },
     "compare": {
       "toggle": "See how the effects differ",
@@ -171,23 +197,117 @@
     "off": "Off: engine defaults (keeps cross-segment coherence); long videos or silence may produce repeated or hallucinated lines.",
     "hint": "Turn on when subtitles loop or repeat heavily. Global setting; applies to both faster-whisper and whisper.cpp."
   },
+  "fasterWhisperAdvanced": {
+    "title": "Advanced decoding parameters",
+    "summary": "Optional; leave blank to use engine defaults",
+    "description": "Applies only to the current faster-whisper task. Values are type- and range-checked before dispatch. Blank fields send no overrides and preserve the engine's default strategy.",
+    "runtimeNote": "Requires the latest faster-whisper runtime with advanced-parameter forwarding. Older runtimes may ignore some settings; check for updates in Resources → Engines.",
+    "rangeError": "Enter a number between {{min}} and {{max}}",
+    "integerRangeError": "Enter a whole number between {{min}} and {{max}}",
+    "reset": "Reset all to engine defaults",
+    "fields": {
+      "beam_size": {
+        "label": "Beam size",
+        "placeholder": "Engine default: 5",
+        "hint": "Whole number from 1–20. Higher values can improve decoding stability at the cost of more computation and time."
+      },
+      "best_of": {
+        "label": "Best of",
+        "placeholder": "Engine default: 5",
+        "hint": "Whole number from 1–20. Keeps more candidates when sampling above zero temperature; higher values cost more computation."
+      },
+      "temperature": {
+        "label": "Sampling temperature",
+        "placeholder": "Engine default: adaptive 0.0 → 1.0 fallback",
+        "hint": "Range 0–1. Higher is more random; a single value replaces the engine's default multi-temperature fallback sequence."
+      },
+      "compression_ratio_threshold": {
+        "label": "Compression ratio threshold",
+        "placeholder": "Engine default: 2.4",
+        "hint": "Range 0–10. Decoding falls back when text compression exceeds this value; low values may cause more retries."
+      },
+      "log_prob_threshold": {
+        "label": "Average log-probability threshold",
+        "placeholder": "Engine default: -1.0",
+        "hint": "Range -5–0. Decoding falls back when the average log probability is below this value."
+      },
+      "no_speech_threshold": {
+        "label": "No-speech threshold",
+        "placeholder": "Engine default: 0.6",
+        "hint": "Range 0–1. Works with the log-probability threshold to skip no-speech segments; lower values skip more readily."
+      }
+    }
+  },
   "subtitleLength": {
-    "label": "Subtitle line breaking",
-    "modeSmart": "Smart segmentation (recommended)",
+    "label": "Line breaking",
+    "modeSmart": "Standard segmentation (default)",
     "modeUnlimited": "No length limit",
     "modeCustom": "Custom length limit",
-    "hintSmart": "The engine splits lines at pauses and punctuation, keeping each subtitle at a readable length.",
+    "modeAi": "AI semantic segmentation (human-like)",
+    "hintSmart": "Splits lines at speech pauses and punctuation, keeping each subtitle at a readable length. Free and works out of the box.",
     "hintUnlimited": "Split only at speech pauses and punctuation. Lines are never force-split by length and may run long.",
-    "hintCustom": "Lines over the limit are split at punctuation or word boundaries, never inside a word. CJK characters count as 2 (40 is about 20 Chinese characters); 30-50 suggested for Chinese, 40-60 for English."
+    "hintCustom": "Lines over the limit are split at punctuation or word boundaries, never inside a word.",
+    "hintAi": "The AI breaks lines by meaning — numbers and fixed phrases are never cut by pauses. Requires an AI provider; falls back to standard segmentation on failure."
   },
   "chinesePunctuation": {
     "label": "Strip Chinese punctuation",
     "hint": "Replace Chinese punctuation (，。、？！ etc.) in Chinese subtitles with spaces and trim trailing spaces for cleaner subtitles. Applies to the source when the source language is Chinese, and to the translation when the target is Chinese."
   },
+  "speakerDiarization": {
+    "label": "Speaker diarization",
+    "hint": "After transcription and translation, analyze the full audio locally and align each cue with its speakers. Processing time scales with audio length; you can choose whether to write speaker labels into exported subtitle files.",
+    "modelReady": "Runtime and model ready",
+    "modelMissing": "Not ready",
+    "modelMissingHint": "You can save this setting, but the run will safely skip diarization. Make sure both the runtime and speaker diarization model are installed under Resources → Local multi-model engine.",
+    "speakerCount": "Number of speakers",
+    "speakerCountHint": "Specifying a known count is usually more stable",
+    "autoDetect": "Auto detect",
+    "embedInSubtitle": "Write speaker labels to subtitle files",
+    "embedInSubtitleHint": "When off, exported SRT/TXT and other subtitle files stay clean; speaker metadata is kept only in the app's proofread data.",
+    "summaryLabel": "Speaker diarization",
+    "summaryAuto": "Auto detect",
+    "summaryKnown": "{{count}} speakers",
+    "summaryEmbedded": "embedded",
+    "summaryMetadataOnly": "in-app only"
+  },
+  "refine": {
+    "provider": {
+      "label": "Refine provider",
+      "follow": "Follow translation service (current: {{name}})",
+      "followUnavailable": "Follow translation service (unresolvable)",
+      "followBlocked": "Translation is off or not an AI provider — pick an AI provider explicitly.",
+      "hint": "Shared by AI segmentation and correction. Defaults to following the translation service; you can also pick a different one (e.g. a large model for translation, local Ollama for refining)."
+    },
+    "approxNote": "The current transcription engine has no word-level timestamps; AI segmentation will use an approximate timeline (proportional interpolation within each cue).",
+    "summary": {
+      "segmentation": "Semantic split",
+      "correction": "Correction"
+    },
+    "control": {
+      "label": "Line break & refine",
+      "title": "Line break & refine",
+      "intro": "Choose how lines break, and whether AI should polish the text. AI features fall back automatically on failure — never worse than off.",
+      "state": {
+        "smart": "Standard",
+        "unlimited": "No limit",
+        "custom": "≤ {{n}} chars",
+        "ai": "AI split",
+        "corrSuffix": " · Fix"
+      },
+      "corrLabel": "AI text correction",
+      "corrHint": "Fix homophones and typos, remove fillers like \"um / uh\", normalize punctuation and casing — timing stays untouched.",
+      "maxCharsLabel": "Max length per line",
+      "maxCharsPlaceholder": "Empty = smart default (~20 CJK chars)",
+      "maxCharsHint": "CJK characters count as 2 (40 ≈ 20 Chinese characters), Latin counts per character. Over-long lines split safely at word boundaries."
+    }
+  },
   "stage": {
     "extract": "Extract",
     "transcribe": "Transcribe",
+    "refine": "Refine",
+    "manuscript": "Script match",
     "translate": "Translate",
+    "speakerDiarization": "Speaker diarization",
     "dubbing": "Dub",
     "compose": "Compose"
   },
@@ -218,6 +338,7 @@
     "retry": "Retry",
     "remove": "Remove",
     "embeddedSubtitle": "Extracted from embedded subtitles",
+    "speakerDiarizationMetadataSaveFailed": "Speaker diarization finished, but its metadata could not be saved. Subtitle processing continued; check the logs and retry.",
     "proofreadTxtUnsupported": "TXT files do not include timing, so they cannot be proofread here. Generate SRT/VTT/ASS for proofreading, then export plain text after proofreading.",
     "proofreadTxtUnsupportedShort": "TXT not supported"
   },

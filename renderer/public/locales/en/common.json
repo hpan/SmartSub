@@ -2,6 +2,7 @@
   "notification": "Notification",
   "nav": {
     "launchpad": "Launchpad",
+    "download": "Download",
     "subtitles": "Subtitles",
     "proofread": "Proofread",
     "compose": "Compose",
@@ -42,6 +43,7 @@
     "DeerAPI": "DeerAPI",
     "Gemini": "Gemini",
     "通义千问": "Tongyi Qianwen",
+    "Qwen-MT": "Qwen-MT",
     "豆包翻译": "Doubao Translation",
     "SiliconFlow": "SiliconFlow",
     "niutrans": "NiuTrans",
@@ -207,6 +209,10 @@
     "aria": "A task is running, click to view recent tasks",
     "label": "Task running"
   },
+  "videoDownloadPill": {
+    "aria": "Video downloads in progress, click to view",
+    "label": "Downloading {{count}} · {{progress}}%"
+  },
   "activity": {
     "aria": "Activity & status",
     "runningTitle": "In progress",
@@ -271,6 +277,11 @@
     "gpuNote": "GPU acceleration: an optional boost that makes transcription several times faster — you can enable it in the last step",
     "step2Title": "Download a speech model",
     "step2Desc": "The app can't transcribe without a model. Downloads run in the background — feel free to continue",
+    "storageDirLabel": "Storage location for models & temp files",
+    "storageDirChange": "Change",
+    "storageDirSaved": "Storage location updated — future models will download to the new location",
+    "storageDirCjkError": "The selected directory contains Chinese (CJK) characters; local engines may fail to read model files. Please choose an ASCII-only path.",
+    "storageDirCjkWarning": "The current default storage location contains Chinese (CJK) characters, which may cause model loading to fail. We strongly recommend changing it to an ASCII-only folder (e.g. D:\\SmartSub) before downloading models.",
     "recommendedChoice": "Recommended for this computer: {{model}}",
     "quickChoice": "Quick try: tiny",
     "quickChoiceDesc": "Smallest and fastest, modest quality — you can switch anytime",
@@ -322,6 +333,7 @@
     "funasr": "FunASR",
     "qwen": "Qwen3-ASR",
     "fireRedAsr": "FireRedASR",
+    "parakeet": "Parakeet TDT",
     "localCli": "Local command",
     "cloud": "Cloud ASR"
   },

@@ -1,0 +1,786 @@
+/// <reference path="./test-globals.d.ts" />
+/**
+ * 在线视频下载单元测试（openspec: add-video-downloader）。
+ *
+ * 覆盖：
+ * - extractUrls：混杂文本抽取、去重、黏连标点清洗、非法丢弃
+ * - routeEngines：域名路由（lux 优先域/默认 yt-dlp）、手动指定、单引擎降级
+ * - compareDateVersion：清单版本比较（yt-dlp 日期版式）
+ * - parseYtDlpProgressLine / parseYtDlpPreflightJson：进度模板与 -J 元数据
+ * - parseYtDlpFilePathLine：--print 文件路径哨兵行（JSON ASCII 转义防 Windows 代码页乱码）
+ * - parseLuxProgressChunk / parseLuxPreflightJson：进度文本与 -j 元数据（含降级判定）
+ * - pickLuxStreamId / parseLuxQualityHeight：画质档位 → lux 选流（就近降档）
+ * - isValidCookieProfileId / isValidCookieDomain / isDownloadableHttpUrl：
+ *   档案 id 路径穿越、裸 TLD 域名、引擎命令行 URL 的边界校验
+ * - isLikelyOutdatedEngineError / tailForError：错误分类与裁剪
+ */
+import {
+  extractUrls,
+  routeEngines,
+  LUX_PREFERRED_DOMAINS,
+  COOKIE_SITE_PRESETS,
+  matchCookieProfile,
+  isValidCookieProfileId,
+  isValidCookieDomain,
+  isDownloadableHttpUrl,
+} from '../types/download';
+import { compareDateVersion } from '../main/helpers/download/versionCompare';
+import {
+  claimSubtitleFileNames,
+  parseYtDlpProgressLine,
+  parseYtDlpFilePathLine,
+  parseYtDlpPreflightJson,
+  parseLuxProgressChunk,
+  parseLuxPreflightJson,
+  parseLuxQualityHeight,
+  pickLuxStreamId,
+  isLikelyOutdatedEngineError,
+  isLikelyAuthError,
+  isLuxPartFileName,
+  tailForError,
+  YTDLP_PROGRESS_TEMPLATE,
+} from '../main/helpers/videoDownload/parsers';
+import {
+  parseNetscapeCookies,
+  serializeNetscapeCookies,
+  filterCookiesByDomains,
+  cookiesFromRawString,
+  computeCookieStatus,
+  normalizeExpiryToUnixSeconds,
+} from '../main/helpers/videoDownload/cookies';
+
+let passed = 0;
+let failed = 0;
+
+function eq(actual: unknown, expected: unknown, name: string): void {
+  const actualJson = JSON.stringify(actual);
+  const expectedJson = JSON.stringify(expected);
+  if (actualJson === expectedJson) {
+    passed++;
+  } else {
+    failed++;
+    console.error(
+      `✗ ${name}\n    expected: ${expectedJson}\n    actual:   ${actualJson}`,
+    );
+  }
+}
+
+function ok(condition: boolean, name: string): void {
+  eq(condition, true, name);
+}
+
+function run(): void {
+  // ==========================================================
+  // extractUrls（spec: 下载页与批量链接输入）
+  // ==========================================================
+  eq(
+    extractUrls(
+      '看这个 https://www.youtube.com/watch?v=abc123 超好笑\nhttps://b23.tv/xyz。\nhttps://www.youtube.com/watch?v=abc123',
+    ),
+    ['https://www.youtube.com/watch?v=abc123', 'https://b23.tv/xyz'],
+    'extractUrls: 混杂文本抽取 + 去重 + 末尾中文句号清洗',
+  );
+  eq(extractUrls(''), [], 'extractUrls: 空文本');
+  eq(extractUrls('没有链接的一段话 http://'), [], 'extractUrls: 非法 URL 丢弃');
+  eq(
+    extractUrls('(https://example.com/v/1), [https://example.com/v/2]'),
+    ['https://example.com/v/1', 'https://example.com/v/2'],
+    'extractUrls: 一行多链接 + 括号/逗号黏连清洗',
+  );
+  eq(
+    extractUrls('ftp://example.com/file 与 https://ok.com/v'),
+    ['https://ok.com/v'],
+    'extractUrls: 仅取 http(s)',
+  );
+
+  // ==========================================================
+  // routeEngines（spec: 引擎路由与失败回退）
+  // ==========================================================
+  const BOTH: Array<'yt-dlp' | 'lux'> = ['yt-dlp', 'lux'];
+  eq(
+    routeEngines('https://www.bilibili.com/video/BV1', 'auto', BOTH),
+    ['yt-dlp', 'lux'],
+    'routeEngines: bilibili → yt-dlp 优先（匿名 1080P vs lux 480P）',
+  );
+  eq(
+    routeEngines('https://b23.tv/abc', 'auto', BOTH),
+    ['yt-dlp', 'lux'],
+    'routeEngines: b23.tv 短链同 bilibili 走 yt-dlp',
+  );
+  eq(
+    routeEngines('https://www.youtube.com/watch?v=1', 'auto', BOTH),
+    ['yt-dlp', 'lux'],
+    'routeEngines: 未命中域 → yt-dlp 优先',
+  );
+  eq(
+    routeEngines('https://v.douyin.com/x/', 'auto', BOTH),
+    ['lux', 'yt-dlp'],
+    'routeEngines: douyin 子域匹配',
+  );
+  eq(
+    routeEngines('https://v.douyin.com/x/', 'auto', ['yt-dlp']),
+    ['yt-dlp'],
+    'routeEngines: 单引擎降级（lux 未装时 lux 优先域也走 yt-dlp）',
+  );
+  eq(
+    routeEngines('https://www.youtube.com/watch?v=1', 'lux', BOTH),
+    ['lux'],
+    'routeEngines: 手动指定跳过路由与回退',
+  );
+  eq(
+    routeEngines('https://www.youtube.com/watch?v=1', 'lux', ['yt-dlp']),
+    [],
+    'routeEngines: 手动指定但未安装 → 空',
+  );
+  eq(
+    routeEngines('not-a-url', 'auto', BOTH),
+    ['yt-dlp', 'lux'],
+    'routeEngines: 非法 URL 走默认序',
+  );
+  ok(
+    LUX_PREFERRED_DOMAINS.includes('xiaohongshu.com'),
+    'routeEngines: 路由表含小红书',
+  );
+
+  // ==========================================================
+  // compareDateVersion（spec: 下载器应用内更新）
+  // ==========================================================
+  ok(
+    compareDateVersion('2026.07.04', '2026.06.09') > 0,
+    'versionCompare: 新版本大于旧版本',
+  );
+  ok(
+    compareDateVersion('2026-07-04', '2026.07.04') === 0,
+    'versionCompare: 分隔符归一化相等',
+  );
+
+  // ==========================================================
+  // yt-dlp 进度模板解析
+  // ==========================================================
+  ok(
+    YTDLP_PROGRESS_TEMPLATE.startsWith('SMARTSUB-DL;'),
+    'ytdlp: 模板携带机器可读前缀',
+  );
+  eq(
+    parseYtDlpProgressLine('SMARTSUB-DL;  12.3%; 3.21MiB/s;00:41'),
+    { progress: 12.3, speed: '3.21MiB/s', eta: '00:41' },
+    'ytdlp: 进度行解析（百分比/速度/ETA）',
+  );
+  eq(
+    parseYtDlpProgressLine('SMARTSUB-DL; 100.0%;Unknown;Unknown'),
+    { progress: 100 },
+    'ytdlp: Unknown 速度/ETA 不透传',
+  );
+  eq(
+    parseYtDlpProgressLine('[download] Destination: foo.mp4'),
+    null,
+    'ytdlp: 非进度行返回 null',
+  );
+
+  // ==========================================================
+  // yt-dlp --print 文件路径哨兵行解析
+  //（%(filepath)j 输出 ASCII 转义 JSON，Windows ANSI 代码页下字节不损坏）
+  // ==========================================================
+  eq(
+    parseYtDlpFilePathLine(
+      'SMARTSUB-FILE;"C:\\\\Users\\\\u\\\\Downloads\\\\The most important theorem in (differential) geometry \\uff5c Euler characteristic #3 [m2Ba6Mlv1LY].mp4"',
+    ),
+    'C:\\Users\\u\\Downloads\\The most important theorem in (differential) geometry ｜ Euler characteristic #3 [m2Ba6Mlv1LY].mp4',
+    'ytdlp: JSON 转义路径还原（全角竖线 \\uff5c + Windows 反斜杠）',
+  );
+  eq(
+    parseYtDlpFilePathLine('SMARTSUB-FILE;"/tmp/a \\"quoted\\" title.mp4"'),
+    '/tmp/a "quoted" title.mp4',
+    'ytdlp: JSON 路径内嵌引号还原',
+  );
+  eq(
+    parseYtDlpFilePathLine(
+      'SMARTSUB-FILE;/Users/x/Movies/geometry ｜ Euler.mp4',
+    ),
+    '/Users/x/Movies/geometry ｜ Euler.mp4',
+    'ytdlp: 非 JSON 裸路径向后兼容',
+  );
+  eq(
+    parseYtDlpFilePathLine('[Merger] Merging formats into "out.mp4"'),
+    null,
+    'ytdlp: 无哨兵前缀返回 null',
+  );
+  eq(
+    parseYtDlpFilePathLine('SMARTSUB-FILE;  '),
+    null,
+    'ytdlp: 空路径返回 null',
+  );
+
+  // ==========================================================
+  // yt-dlp -J 预检解析
+  // ==========================================================
+  eq(
+    parseYtDlpPreflightJson(
+      JSON.stringify({
+        title: 'Test Video',
+        duration: 213.5,
+        thumbnail: 'https://i.ytimg.com/t.jpg',
+        formats: [
+          { height: 720 },
+          { height: 1080 },
+          { height: null },
+          { height: 1080 },
+        ],
+      }),
+    ),
+    {
+      title: 'Test Video',
+      duration: 213.5,
+      thumbnail: 'https://i.ytimg.com/t.jpg',
+      heights: [1080, 720],
+    },
+    'ytdlp preflight: 单视频（标题/时长/清晰度去重降序）',
+  );
+  eq(
+    parseYtDlpPreflightJson(
+      JSON.stringify({
+        _type: 'playlist',
+        title: 'My List',
+        entries: [
+          { url: 'https://youtu.be/1', title: 'ep1' },
+          { url: 'https://youtu.be/2' },
+          { title: 'no-url-entry' },
+        ],
+      }),
+    ),
+    {
+      title: 'My List',
+      playlistCount: 3,
+      playlistItems: [
+        { url: 'https://youtu.be/1', title: 'ep1' },
+        { url: 'https://youtu.be/2' },
+      ],
+    },
+    'ytdlp preflight: 播放列表（条目数 + 有效条目提取）',
+  );
+
+  // ==========================================================
+  // yt-dlp 预检官方字幕（spec: 下载前预检 - 官方字幕徽章标注）
+  // ==========================================================
+  eq(
+    parseYtDlpPreflightJson(
+      JSON.stringify({
+        title: 'Subbed',
+        subtitles: { 'zh-Hans': [{}], en: [{}], live_chat: [{}] },
+        automatic_captions: { ja: [{}], ko: [{}] },
+      }),
+    ),
+    { title: 'Subbed', subtitleLangs: ['en', 'zh-Hans'] },
+    'ytdlp preflight: 官方字幕语言排序 + live_chat 剔除 + 自动字幕无视',
+  );
+  eq(
+    parseYtDlpPreflightJson(
+      JSON.stringify({
+        title: 'AutoOnly',
+        subtitles: {},
+        automatic_captions: { en: [{}] },
+      }),
+    ),
+    { title: 'AutoOnly' },
+    'ytdlp preflight: 仅自动字幕 → 无 subtitleLangs',
+  );
+  eq(
+    parseYtDlpPreflightJson(
+      JSON.stringify({ title: 'LiveOnly', subtitles: { live_chat: [{}] } }),
+    ),
+    { title: 'LiveOnly' },
+    'ytdlp preflight: 仅 live_chat → 无 subtitleLangs',
+  );
+
+  // ==========================================================
+  // 字幕文件认领（spec: 源站字幕直取 - 按视频主干认领）
+  // ==========================================================
+  const dirListing = [
+    'Foo Video [abc123].mp4',
+    'Foo Video [abc123].en.srt',
+    'Foo Video [abc123].zh-Hans.vtt',
+    'Foo Video [abc123].live_chat.json',
+    'Foo Video [abc123].srt.part',
+    'Bar Video [xyz789].en.srt',
+    'Foo Video [abc123] another.en.srt',
+    '全世界笑点[0].mp4',
+  ];
+  eq(
+    claimSubtitleFileNames('Foo Video [abc123].mp4', dirListing),
+    ['Foo Video [abc123].en.srt', 'Foo Video [abc123].zh-Hans.vtt'],
+    'claimSubs: 同主干多语言认领（srt/vtt）+ 无关文件/json/part 排除 + 排序确定',
+  );
+  eq(
+    claimSubtitleFileNames('Foo Video [abc123].mp4', [
+      'Foo Video [abc123].srt',
+    ]),
+    [],
+    'claimSubs: 裸 `主干.srt`（无语言中缀）不认领',
+  );
+  eq(
+    claimSubtitleFileNames('Ep 1 [id1].mp4', ['Ep 1.5 [id2].en.srt']),
+    [],
+    'claimSubs: 相近主干不误认领（[id] 唯一性）',
+  );
+  eq(
+    claimSubtitleFileNames('demo.mkv', ['demo.en.ASS', 'demo.en.ssa']),
+    ['demo.en.ASS'],
+    'claimSubs: 扩展名大小写不敏感 + ssa 不在白名单',
+  );
+  eq(claimSubtitleFileNames('.mp4', ['.en.srt']), [], 'claimSubs: 空主干防御');
+
+  // ==========================================================
+  // lux 解析
+  // ==========================================================
+  eq(
+    parseLuxProgressChunk(
+      ' 1.10 MiB / 720.00 MiB [>--------------] 0.15% 3.20 MiB/s 00m41s',
+    ),
+    { progress: 0.15, speed: '3.20MiB/s' },
+    'lux: 进度条文本解析',
+  );
+  eq(
+    parseLuxProgressChunk('Downloading segment 3...'),
+    null,
+    'lux: 无百分比文本返回 null（触发文件大小轮询降级）',
+  );
+  eq(
+    parseLuxProgressChunk('10.0% ... 55.5%'),
+    { progress: 55.5 },
+    'lux: 多个百分比取最后一个',
+  );
+  eq(
+    parseLuxPreflightJson(
+      JSON.stringify([
+        {
+          title: 'B站视频',
+          streams: {
+            '80': { parts: [{ size: 1000 }, { size: 2000 }] },
+            '32': { size: 500 },
+          },
+        },
+      ]),
+    ),
+    {
+      title: 'B站视频',
+      totalBytes: 3000,
+      luxStreams: [
+        { id: '80', size: 3000 },
+        { id: '32', size: 500 },
+      ],
+    },
+    'lux preflight: 标题 + 最大流体积（parts 求和）+ 流列表体积降序',
+  );
+  eq(
+    parseLuxPreflightJson(JSON.stringify([{ title: 'a' }, { title: 'b' }])),
+    { title: 'a', playlistCount: 2 },
+    'lux preflight: 多条目 → playlistCount（无流列表不带 luxStreams）',
+  );
+
+  // ==========================================================
+  // lux 画质选流（spec: 清晰度档位 - 不满足时就近降档）
+  // ==========================================================
+  const luxStreams = [
+    { id: '116', quality: '高清 1080P60', size: 900 },
+    { id: '80', quality: '高清 1080P', size: 800 },
+    { id: '64', quality: '高清 720P', size: 500 },
+    { id: '32', quality: '清晰 480P', size: 300 },
+  ];
+  eq(
+    pickLuxStreamId(luxStreams, 'best'),
+    undefined,
+    'luxStream: best 不选流（lux 默认最优）',
+  );
+  eq(
+    pickLuxStreamId(luxStreams, '1080p'),
+    '116',
+    'luxStream: 1080p 取 ≤1080 最高档（同高度取更大体积）',
+  );
+  eq(pickLuxStreamId(luxStreams, '720p'), '64', 'luxStream: 720p 档位命中');
+  eq(
+    pickLuxStreamId([{ id: '80', quality: '高清 1080P' }], '720p'),
+    '80',
+    'luxStream: 全部高于目标 → 就近取最低档',
+  );
+  eq(
+    pickLuxStreamId([{ id: 'hd', quality: '超清' }], '1080p'),
+    undefined,
+    'luxStream: 高度不可解析 → lux 默认',
+  );
+  eq(pickLuxStreamId(undefined, '1080p'), undefined, 'luxStream: 无流列表');
+  eq(
+    parseLuxQualityHeight('高清 1080P60'),
+    1080,
+    'luxStream: 画质字符串高度解析（P 后带帧率）',
+  );
+  eq(
+    parseLuxQualityHeight('4K 超清'),
+    undefined,
+    'luxStream: 无 <高度>P 形状不解析',
+  );
+
+  // ==========================================================
+  // lux 分片文件名判定（合并前中间产物不可认领为成品）
+  // ==========================================================
+  ok(
+    isLuxPartFileName('全世界笑点[0].mp4', '全世界笑点'),
+    'luxPart: baseName + [0] 视频分片',
+  );
+  ok(
+    isLuxPartFileName('全世界笑点[1].m4a', '全世界笑点'),
+    'luxPart: baseName + [1] 音频分片',
+  );
+  ok(
+    !isLuxPartFileName('全世界笑点.mp4', '全世界笑点'),
+    'luxPart: 合并后成品不是分片',
+  );
+  ok(
+    !isLuxPartFileName('别的视频[0].mp4', '全世界笑点'),
+    'luxPart: baseName 不匹配不认领',
+  );
+  ok(isLuxPartFileName('某标题[0].mp4'), 'luxPart: 无 baseName 时启发式命中');
+  ok(
+    !isLuxPartFileName('Big Buck Bunny [BigBuckBunny_124].avi'),
+    'luxPart: yt-dlp 的字母 id 后缀不误判',
+  );
+  ok(
+    !isLuxPartFileName('年度回顾 [2024].mp4'),
+    'luxPart: 3 位以上数字后缀不误判（标题年份）',
+  );
+
+  // ==========================================================
+  // 错误分类与裁剪
+  // ==========================================================
+  ok(
+    isLikelyOutdatedEngineError(
+      'ERROR: Unsupported URL: https://example.com/x',
+    ),
+    'error: Unsupported URL → 疑似过旧',
+  );
+  ok(
+    isLikelyOutdatedEngineError('Unable to extract player version'),
+    'error: Unable to extract → 疑似过旧',
+  );
+  ok(
+    !isLikelyOutdatedEngineError('HTTP Error 403: Forbidden'),
+    'error: 403 不判为过旧',
+  );
+  eq(
+    tailForError('line1\nERROR: bad thing happened\nline3\n'),
+    'ERROR: bad thing happened',
+    'error: 优先提取 ERROR 行',
+  );
+  eq(tailForError('a\nb\nc\nd'), 'b | c | d', 'error: 无 ERROR 行时取末尾行');
+
+  // ==========================================================
+  // matchCookieProfile（spec: 子进程环境注入 - URL→档案匹配）
+  // ==========================================================
+  const presetMatchList = COOKIE_SITE_PRESETS.map((p) => ({
+    id: p.id,
+    matchDomains: p.matchDomains,
+  }));
+  eq(
+    matchCookieProfile('https://www.bilibili.com/video/BV1', presetMatchList),
+    'bilibili',
+    'matchCookie: bilibili 主域命中',
+  );
+  eq(
+    matchCookieProfile('https://b23.tv/abc', presetMatchList),
+    'bilibili',
+    'matchCookie: b23.tv 短链别名命中 bilibili',
+  );
+  eq(
+    matchCookieProfile('https://youtu.be/xyz', presetMatchList),
+    'youtube',
+    'matchCookie: youtu.be 别名命中 youtube',
+  );
+  eq(
+    matchCookieProfile('https://www.youtube.com/watch?v=1', presetMatchList),
+    'youtube',
+    'matchCookie: youtube 子域命中',
+  );
+  eq(
+    matchCookieProfile('https://example.com/v', presetMatchList),
+    null,
+    'matchCookie: 未命中返回 null',
+  );
+  eq(
+    matchCookieProfile('not-a-url', presetMatchList),
+    null,
+    'matchCookie: 非法 URL 返回 null',
+  );
+  eq(
+    matchCookieProfile('https://www.bilibili.com/x', [
+      { id: 'bilibili', matchDomains: ['bilibili.com'], configured: false },
+    ]),
+    null,
+    'matchCookie: 未配置档案（configured:false）跳过',
+  );
+  eq(
+    matchCookieProfile('https://vimeo.com/1', [
+      { id: 'custom-1', matchDomains: ['vimeo.com'] },
+    ]),
+    'custom-1',
+    'matchCookie: 自定义域名档案命中',
+  );
+
+  // ==========================================================
+  // Netscape 解析 / 过滤 / 序列化
+  // ==========================================================
+  const biliSess = [
+    '#HttpOnly_.bilibili.com',
+    'TRUE',
+    '/',
+    'TRUE',
+    '1893456000',
+    'SESSDATA',
+    'abc',
+  ].join('\t');
+  const biliJct = [
+    '.bilibili.com',
+    'TRUE',
+    '/',
+    'FALSE',
+    '0',
+    'bili_jct',
+    'def',
+  ].join('\t');
+  const twitterTok = [
+    '.twitter.com',
+    'TRUE',
+    '/',
+    'TRUE',
+    '1893456000',
+    'auth_token',
+    'zzz',
+  ].join('\t');
+  const sampleFile = [
+    '# Netscape HTTP Cookie File',
+    '',
+    biliSess,
+    biliJct,
+    'malformed-line-without-tabs',
+  ].join('\n');
+  const parsedCookies = parseNetscapeCookies(sampleFile);
+  eq(
+    parsedCookies.length,
+    2,
+    'netscape: 注释/空行/字段不足行跳过，保留 #HttpOnly_ 数据行',
+  );
+  eq(parsedCookies[0].name, 'SESSDATA', 'netscape: 首行 name');
+  eq(parsedCookies[0].expiry, 1893456000, 'netscape: expiry 解析');
+  eq(parsedCookies[1].expiry, 0, 'netscape: 会话 cookie expiry=0');
+  eq(
+    parsedCookies[0].domain,
+    '.bilibili.com',
+    'netscape: #HttpOnly_ 前缀从 domain 剥离',
+  );
+  eq(parsedCookies[0].httpOnly, true, 'netscape: #HttpOnly_ → httpOnly 标记');
+  eq(parsedCookies[1].httpOnly, false, 'netscape: 普通行 httpOnly=false');
+  // 序列化不得回写 #HttpOnly_（lux 的 cookiemonster 会把 # 开头行当注释丢弃）
+  const serialized = serializeNetscapeCookies(parsedCookies);
+  ok(
+    !serialized.includes('#HttpOnly_'),
+    'netscape: 序列化输出不含 #HttpOnly_ 前缀（lux 兼容）',
+  );
+  ok(
+    /^\.bilibili\.com\tTRUE\t\/\tTRUE\t1893456000\tSESSDATA\t/m.test(
+      serialized,
+    ),
+    'netscape: HttpOnly cookie 序列化为普通 domain 行',
+  );
+  // 历史损坏值 .#HttpOnly_.x 容错：前缀在首个 TAB 前仍识别，domain 恢复
+  const corrupted = [
+    '.#HttpOnly_.bilibili.com',
+    'TRUE',
+    '/',
+    'TRUE',
+    '1893456000',
+    'SESSDATA',
+    'abc',
+  ].join('\t');
+  eq(
+    parseNetscapeCookies(corrupted)[0].domain,
+    '.bilibili.com',
+    'netscape: 容错历史损坏前缀 .#HttpOnly_ → 恢复 domain',
+  );
+
+  // ==========================================================
+  // expiry 归一化（Chrome 原生微秒 / 毫秒 → Unix 秒）
+  // ==========================================================
+  eq(
+    normalizeExpiryToUnixSeconds(1795317817),
+    1795317817,
+    'expiry: 已是 Unix 秒原样返回',
+  );
+  eq(
+    normalizeExpiryToUnixSeconds(13439791416831512),
+    1795317817,
+    'expiry: Chromium 微秒(自1601)→Unix 秒（B站 SESSDATA 实测值）',
+  );
+  eq(
+    normalizeExpiryToUnixSeconds(1795317817000),
+    1795317817,
+    'expiry: 毫秒→秒',
+  );
+  eq(normalizeExpiryToUnixSeconds(0), 0, 'expiry: 0 会话 cookie');
+  eq(normalizeExpiryToUnixSeconds(NaN), 0, 'expiry: 非法→0');
+  ok(
+    !Number.isNaN(
+      new Date(
+        normalizeExpiryToUnixSeconds(13439791416831512) * 1000,
+      ).getTime(),
+    ),
+    'expiry: 归一后 new Date 有效（非 Invalid Date）',
+  );
+  // Netscape 行携带 Chromium 微秒时间戳也应被归一
+  const microLine = [
+    '#HttpOnly_.bilibili.com',
+    'TRUE',
+    '/',
+    'TRUE',
+    '13439791416831512',
+    'SESSDATA',
+    'abc',
+  ].join('\t');
+  eq(
+    parseNetscapeCookies(microLine)[0].expiry,
+    1795317817,
+    'netscape: 行内 Chromium 微秒 expiry 被归一',
+  );
+  eq(
+    filterCookiesByDomains(
+      parseNetscapeCookies([biliSess, twitterTok].join('\n')),
+      ['bilibili.com'],
+    ).length,
+    1,
+    'netscape: 域过滤剔除无关站点（含 #HttpOnly_/. 前缀归一）',
+  );
+  eq(
+    parseNetscapeCookies(serializeNetscapeCookies(parsedCookies)).length,
+    2,
+    'netscape: 序列化后可回解析（round-trip）',
+  );
+
+  // ==========================================================
+  // 原始 Cookie 串合成
+  // ==========================================================
+  const synth = cookiesFromRawString(
+    'SESSDATA=xxx; bili_jct=yyy',
+    'bilibili.com',
+  );
+  eq(synth.length, 2, 'rawCookie: 分号分隔合成两条');
+  eq(synth[0].domain, '.bilibili.com', 'rawCookie: 主域带前导点覆盖子域');
+  eq(synth[0].expiry, 0, 'rawCookie: 会话 cookie 无过期');
+  ok(synth[0].secure, 'rawCookie: secure=TRUE');
+  eq(
+    cookiesFromRawString('  ; =noname; onlyname', 'x.com').length,
+    0,
+    'rawCookie: 非法片段全丢弃',
+  );
+
+  // ==========================================================
+  // 档案状态计算（过期判定）
+  // ==========================================================
+  eq(
+    computeCookieStatus(parsedCookies, ['SESSDATA'], 1000000000).expired,
+    false,
+    'cookieStatus: 关键 cookie 未过期',
+  );
+  eq(
+    computeCookieStatus(parsedCookies, ['SESSDATA'], 2000000000).expired,
+    true,
+    'cookieStatus: 关键 cookie 已过期',
+  );
+  eq(
+    computeCookieStatus(parsedCookies, ['SESSDATA'], 1000000000).expiresAt,
+    1893456000,
+    'cookieStatus: expiresAt 取关键 cookie',
+  );
+  eq(
+    computeCookieStatus(
+      cookiesFromRawString('a=b; c=d', 'x.com'),
+      [],
+      1000000000,
+    ).expiresAt,
+    undefined,
+    'cookieStatus: 全会话 cookie → expiresAt 缺省',
+  );
+
+  // ==========================================================
+  // isLikelyAuthError（spec: Cookie 失效提示 - 鉴权特征）
+  // ==========================================================
+  ok(isLikelyAuthError('HTTP Error 403: Forbidden'), 'authError: 403 命中');
+  ok(
+    isLikelyAuthError('This video is members-only content'),
+    'authError: members-only 命中',
+  );
+  ok(isLikelyAuthError('需要登录后观看'), 'authError: 中文需登录命中');
+  ok(isLikelyAuthError('大会员专享清晰度'), 'authError: 大会员命中');
+  ok(
+    !isLikelyAuthError('HTTP Error 404: Not Found'),
+    'authError: 404 不判为鉴权',
+  );
+  ok(
+    !isLikelyAuthError('Unsupported URL: https://x'),
+    'authError: 提取器失效不判为鉴权',
+  );
+  const comboErr =
+    'yt-dlp: HTTP Error 403: Forbidden || lux: unable to extract';
+  ok(isLikelyAuthError(comboErr), 'authError: 组合信息命中鉴权');
+  ok(
+    isLikelyOutdatedEngineError(comboErr),
+    'authError: 组合信息也含过旧特征（scheduler 侧 cookie 前缀优先）',
+  );
+
+  // ==========================================================
+  // isValidCookieProfileId（安全：id 拼接 {id}.cookies 路径，防穿越）
+  // ==========================================================
+  ok(isValidCookieProfileId('bilibili'), 'profileId: 预设 bilibili');
+  ok(isValidCookieProfileId('youtube'), 'profileId: 预设 youtube');
+  ok(
+    isValidCookieProfileId('custom-6f9619ff-8b86-d011-b42d-00cf4fc964ff'),
+    'profileId: custom-<uuid>',
+  );
+  ok(!isValidCookieProfileId('../../evil'), 'profileId: 路径穿越拒绝');
+  ok(!isValidCookieProfileId('bilibili/../x'), 'profileId: 内嵌路径段拒绝');
+  ok(!isValidCookieProfileId('custom-..'), 'profileId: 非 uuid custom 拒绝');
+  ok(!isValidCookieProfileId(''), 'profileId: 空串拒绝');
+  ok(!isValidCookieProfileId(undefined), 'profileId: 非字符串拒绝');
+
+  // ==========================================================
+  // isValidCookieDomain（安全：裸 TLD 后缀匹配全网 + lux 全量附 jar）
+  // ==========================================================
+  ok(isValidCookieDomain('bilibili.com'), 'cookieDomain: 常规域名');
+  ok(isValidCookieDomain('b23.tv'), 'cookieDomain: 短域名');
+  ok(isValidCookieDomain('EXAMPLE.COM'), 'cookieDomain: 大小写归一');
+  ok(!isValidCookieDomain('com'), 'cookieDomain: 裸 TLD 拒绝');
+  ok(!isValidCookieDomain('evil.com/path'), 'cookieDomain: 含路径拒绝');
+  ok(!isValidCookieDomain('.com'), 'cookieDomain: 空标签拒绝');
+  ok(!isValidCookieDomain('-bad.com'), 'cookieDomain: 连字符开头标签拒绝');
+  ok(!isValidCookieDomain(''), 'cookieDomain: 空串拒绝');
+
+  // ==========================================================
+  // isDownloadableHttpUrl（安全：URL 直达引擎命令行，仅放行 http(s)）
+  // ==========================================================
+  ok(
+    isDownloadableHttpUrl('https://www.youtube.com/watch?v=1'),
+    'httpUrl: https 放行',
+  );
+  ok(isDownloadableHttpUrl('http://example.com/v'), 'httpUrl: http 放行');
+  ok(!isDownloadableHttpUrl('file:///etc/passwd'), 'httpUrl: file 协议拒绝');
+  ok(
+    !isDownloadableHttpUrl('javascript:alert(1)'),
+    'httpUrl: javascript 协议拒绝',
+  );
+  ok(
+    !isDownloadableHttpUrl('-o/tmp/evil'),
+    'httpUrl: `-` 开头伪 URL 拒绝（lux 参数注入面）',
+  );
+  ok(!isDownloadableHttpUrl(''), 'httpUrl: 空串拒绝');
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed > 0) process.exit(1);
+}
+
+run();

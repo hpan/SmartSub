@@ -10,30 +10,30 @@ import {
   type SubtitleEntry,
 } from './subtitleFormats';
 import { logMessage } from './storeManager';
+import {
+  speakerIdsForCues,
+  stripSpeakerLabelPrefix,
+  type SpeakerDiarizationSegment,
+} from './speakerDiarization/alignment';
+import {
+  mergeSpeakerIds,
+  realignSpeakerIdsForCue,
+} from '../../types/speakerDiarization';
+import {
+  PROOFREAD_DATA_VERSION,
+  hasExplicitSpeakerAssignment,
+  normalizePrimarySpeakerId,
+  normalizeProofreadData,
+  normalizeSpeakerIds,
+  normalizeSpeakerRoster,
+  shouldRealignSpeakerAssignment,
+  type ProofreadDataCue,
+  type ProofreadDataFileV2,
+  type SpeakerInfo,
+} from '../../types/proofreadData';
 
-export interface ProofreadDataCue {
-  id: string;
-  startMs: number;
-  endMs: number;
-  source: string;
-  target: string;
-}
-
-export interface ProofreadDataFile {
-  version: 1;
-  meta: {
-    createdAt: string;
-    updatedAt: string;
-    sourceLanguage?: string;
-    targetLanguage?: string;
-    translateContent?: string;
-    outputFormat?: string;
-    sourceFile?: string;
-    targetFile?: string;
-    finalTargetFile?: string;
-  };
-  cues: ProofreadDataCue[];
-}
+export type { ProofreadDataCue, SpeakerInfo } from '../../types/proofreadData';
+export type ProofreadDataFile = ProofreadDataFileV2;
 
 export interface ProofreadSubtitleRow {
   id: string;
@@ -44,7 +44,18 @@ export interface ProofreadSubtitleRow {
   startTimeInSeconds: number;
   endTimeInSeconds: number;
   isEditing: boolean;
+  speakerIds?: number[];
+  primarySpeakerId?: number;
+  speakerAssignmentSource?: 'manual';
 }
+
+export type ProofreadDataWriteResult =
+  | { ok: true; filePath: string }
+  | {
+      ok: false;
+      reason: 'source-unavailable' | 'write-failed';
+      error?: string;
+    };
 
 function safeFileNamePart(input: string): string {
   const cleaned = input
@@ -86,6 +97,7 @@ function entryText(entry?: SubtitleEntry): string {
 function buildCues(
   sourceEntries: SubtitleEntry[],
   targetEntries: SubtitleEntry[],
+  speakerSegments: SpeakerDiarizationSegment[] = [],
 ): ProofreadDataCue[] {
   const targetByTime = new Map<string, SubtitleEntry>();
   for (const entry of targetEntries) {
@@ -94,18 +106,35 @@ function buildCues(
     }
   }
 
+  const timedCues = sourceEntries.map((sourceEntry) => {
+    const { startMs, endMs } = parseStartEndTime(sourceEntry.startEndTime);
+    return { startMs, endMs, text: entryText(sourceEntry) };
+  });
+  const speakerIds = speakerIdsForCues(timedCues, speakerSegments);
+
   return sourceEntries.map((sourceEntry, index) => {
     const targetEntry =
       targetByTime.get(sourceEntry.startEndTime) || targetEntries[index];
     const { startMs, endMs } = parseStartEndTime(sourceEntry.startEndTime);
 
-    return {
+    const assignedSpeakerIds = normalizeSpeakerIds(speakerIds[index]);
+    const cleanSpeakerPrefix = assignedSpeakerIds.length > 0;
+    const cue: ProofreadDataCue = {
       id: sourceEntry.id || String(index + 1),
       startMs,
       endMs,
-      source: entryText(sourceEntry),
-      target: entryText(targetEntry),
+      source: cleanSpeakerPrefix
+        ? stripSpeakerLabelPrefix(entryText(sourceEntry))
+        : entryText(sourceEntry),
+      target: cleanSpeakerPrefix
+        ? stripSpeakerLabelPrefix(entryText(targetEntry))
+        : entryText(targetEntry),
     };
+    if (assignedSpeakerIds.length) {
+      cue.speakerIds = assignedSpeakerIds;
+      cue.primarySpeakerId = assignedSpeakerIds[0];
+    }
+    return cue;
   });
 }
 
@@ -118,6 +147,7 @@ export async function writeProofreadDataFromFiles({
   targetLanguage,
   translateContent,
   outputFormat,
+  speakerSegments,
 }: {
   file: IFiles;
   sourceFile?: string;
@@ -127,7 +157,8 @@ export async function writeProofreadDataFromFiles({
   targetLanguage?: string;
   translateContent?: string;
   outputFormat?: string;
-}): Promise<string | null> {
+  speakerSegments?: SpeakerDiarizationSegment[];
+}): Promise<ProofreadDataWriteResult> {
   try {
     const sourceEntries = await readSubtitleEntries(sourceFile);
     if (sourceEntries.length === 0) {
@@ -135,13 +166,14 @@ export async function writeProofreadDataFromFiles({
         `skip proofread data: source subtitle has no cues (${sourceFile})`,
         'warning',
       );
-      return null;
+      return { ok: false, reason: 'source-unavailable' };
     }
 
     const targetEntries = await readSubtitleEntries(targetFile);
     const now = new Date().toISOString();
+    const cues = buildCues(sourceEntries, targetEntries, speakerSegments);
     const proofreadData: ProofreadDataFile = {
-      version: 1,
+      version: PROOFREAD_DATA_VERSION,
       meta: {
         createdAt: now,
         updatedAt: now,
@@ -153,7 +185,8 @@ export async function writeProofreadDataFromFiles({
         targetFile,
         finalTargetFile,
       },
-      cues: buildCues(sourceEntries, targetEntries),
+      speakers: normalizeSpeakerRoster([], cues),
+      cues,
     };
 
     const proofreadDataFile = getProofreadDataPath(file);
@@ -166,10 +199,14 @@ export async function writeProofreadDataFromFiles({
       'utf-8',
     );
     logMessage(`proofread data written: ${proofreadDataFile}`, 'info');
-    return proofreadDataFile;
+    return { ok: true, filePath: proofreadDataFile };
   } catch (error) {
     logMessage(`write proofread data failed: ${error}`, 'warning');
-    return null;
+    return {
+      ok: false,
+      reason: 'write-failed',
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -177,11 +214,27 @@ export async function readProofreadDataFile(
   filePath: string,
 ): Promise<ProofreadDataFile> {
   const content = await fs.promises.readFile(filePath, 'utf-8');
-  const parsed = JSON.parse(content) as ProofreadDataFile;
-  if (parsed?.version !== 1 || !Array.isArray(parsed.cues)) {
+  try {
+    const raw = JSON.parse(content);
+    const normalized = normalizeProofreadData(raw);
+    // v1 was created while technical labels could still be embedded in the
+    // source/target text. Keep migration idempotent and only strip labels from
+    // cues that already carry structured speaker assignments.
+    if (raw?.version === 1) {
+      normalized.cues = normalized.cues.map((cue) =>
+        cue.speakerIds?.length
+          ? {
+              ...cue,
+              source: stripSpeakerLabelPrefix(cue.source),
+              target: stripSpeakerLabelPrefix(cue.target),
+            }
+          : cue,
+      );
+    }
+    return normalized;
+  } catch {
     throw new Error(`Invalid proofread data file: ${filePath}`);
   }
-  return parsed;
 }
 
 export function proofreadDataToSubtitleRows(
@@ -200,6 +253,15 @@ export function proofreadDataToSubtitleRows(
       startTimeInSeconds: cue.startMs / 1000,
       endTimeInSeconds: cue.endMs / 1000,
       isEditing: false,
+      ...(hasExplicitSpeakerAssignment(cue)
+        ? { speakerIds: [...(cue.speakerIds || [])] }
+        : {}),
+      ...(cue.primarySpeakerId
+        ? { primarySpeakerId: cue.primarySpeakerId }
+        : {}),
+      ...(cue.speakerAssignmentSource === 'manual'
+        ? { speakerAssignmentSource: 'manual' as const }
+        : {}),
     };
   });
 }
@@ -207,25 +269,67 @@ export function proofreadDataToSubtitleRows(
 export async function updateProofreadDataFromSubtitles(
   filePath: string,
   subtitles: ProofreadSubtitleRow[],
+  speakers?: SpeakerInfo[],
 ): Promise<ProofreadDataFile> {
   const existing = await readProofreadDataFile(filePath);
+  const existingById = new Map(existing.cues.map((cue) => [cue.id, cue]));
   const now = new Date().toISOString();
   const updated: ProofreadDataFile = {
     ...existing,
+    version: PROOFREAD_DATA_VERSION,
     meta: {
       ...existing.meta,
       updatedAt: now,
     },
+    speakers: normalizeSpeakerRoster(speakers || existing.speakers, subtitles),
     cues: subtitles.map((subtitle, index) => {
       const { startMs, endMs } = parseStartEndTime(subtitle.startEndTime);
       const source =
         subtitle.sourceContent ?? subtitle.content?.join('\n') ?? '';
+      const previous = existingById.get(subtitle.id) || existing.cues[index];
+      const timingChanged = Boolean(
+        previous && (previous.startMs !== startMs || previous.endMs !== endMs),
+      );
+      const hasCurrentAssignment = hasExplicitSpeakerAssignment(subtitle);
+      const currentSpeakerIds = hasCurrentAssignment
+        ? subtitle.speakerIds
+        : previous?.speakerIds;
+      const speakerAssignmentSource =
+        subtitle.speakerAssignmentSource || previous?.speakerAssignmentSource;
+      // Timing-based realignment is only valid for automatic assignments.
+      // Once the user has corrected a cue, the current row (including an
+      // explicit empty array) is authoritative across timing edits and saves.
+      const speakerIds = shouldRealignSpeakerAssignment(
+        timingChanged,
+        speakerAssignmentSource,
+      )
+        ? realignSpeakerIdsForCue(
+            startMs,
+            endMs,
+            existing.cues,
+            currentSpeakerIds,
+          )
+        : mergeSpeakerIds(currentSpeakerIds);
+      const normalizedSpeakerIds = normalizeSpeakerIds(speakerIds);
+      const primarySpeakerId = normalizePrimarySpeakerId(
+        subtitle.primarySpeakerId ?? previous?.primarySpeakerId,
+        normalizedSpeakerIds,
+      );
       return {
         id: subtitle.id || String(index + 1),
         startMs,
         endMs,
         source,
         target: subtitle.targetContent ?? '',
+        ...(normalizedSpeakerIds.length || speakerAssignmentSource === 'manual'
+          ? {
+              speakerIds: normalizedSpeakerIds,
+              ...(primarySpeakerId ? { primarySpeakerId } : {}),
+            }
+          : {}),
+        ...(speakerAssignmentSource === 'manual'
+          ? { speakerAssignmentSource: 'manual' as const }
+          : {}),
       };
     }),
   };

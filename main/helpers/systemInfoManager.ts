@@ -1,5 +1,6 @@
-import { ipcMain, BrowserWindow, dialog, shell } from 'electron';
+import { app, ipcMain, BrowserWindow, dialog, shell } from 'electron';
 import os from 'os';
+import { randomUUID } from 'crypto';
 import { getModelsInstalled, getPath, deleteModel } from './whisper';
 import {
   getFasterWhisperModelsInstalled,
@@ -8,9 +9,11 @@ import {
 } from './modelCatalog';
 import {
   validateModelLayout,
+  validateCt2ModelSnapshot,
   CT2_REQUIRED_FILES,
   CT2_IMPORT_SNAPSHOT_REV,
 } from './modelImport';
+import { commitStagedDirectory } from './download/atomicDirectoryInstall';
 import {
   isRuntimeInstalled,
   readEngineManifest,
@@ -55,6 +58,8 @@ import {
   getInstalledQwenModels,
   getQwenModelsRoot,
   getQwenArchiveUrl,
+  getQwenSupportedSources,
+  validateQwenModelLayout,
 } from './qwenModelCatalog';
 import {
   getFireRedModelDownloader,
@@ -73,6 +78,23 @@ import {
   getFireRedModelsRoot,
   getFireRedArchiveUrl,
 } from './fireRedModelCatalog';
+import {
+  getParakeetModelDownloader,
+  getParakeetProgressKey,
+} from './parakeetModelDownloader';
+import {
+  PARAKEET_MODELS,
+  ParakeetModelId,
+  PARAKEET_DEFAULT_MODEL_ID,
+  ParakeetModelSource,
+  isParakeetModelInstalled,
+  isParakeetVadInstalled,
+  isParakeetReady,
+  deleteParakeetModel,
+  getInstalledParakeetModels,
+  getParakeetModelsRoot,
+  getParakeetArchiveUrl,
+} from './parakeetModelCatalog';
 import { getTtsModelDownloader, getTtsProgressKey } from './ttsModelDownloader';
 import {
   TTS_MODELS,
@@ -91,9 +113,22 @@ import { getSherpaTtsRuntime } from './sherpaOnnx/ttsRuntime';
 import fse from 'fs-extra';
 import path from 'path';
 import { getTempDir } from './fileUtils';
-import { logMessage } from './storeManager';
+import { logMessage, store } from './storeManager';
+import { resolveModelRoot, type StorageKind } from './storagePaths';
 import { testTranslation } from '../translate';
 import { getBuildInfo } from './buildInfo';
+import { getSpeakerDiarizationModelDownloader } from './speakerDiarization/modelDownloader';
+import {
+  SPEAKER_DIARIZATION_EMBEDDING_FILE,
+  SPEAKER_DIARIZATION_PROGRESS_KEY,
+  type SpeakerDiarizationModelSource,
+  deleteSpeakerDiarizationModel,
+  getSpeakerDiarizationModelDir,
+  getSpeakerDiarizationModelsRoot,
+  isSpeakerDiarizationModelInstalled,
+  validateSpeakerDiarizationModelDir,
+} from './speakerDiarization/modelCatalog';
+import { getSpeakerDiarizationRuntime } from './speakerDiarization/runtime';
 
 let downloadingModels = new Set<string>();
 
@@ -102,19 +137,32 @@ type FolderImportEngine =
   | 'funasr'
   | 'qwen'
   | 'fireRedAsr'
+  | 'parakeet'
   | 'fasterWhisper'
-  | 'tts';
+  | 'tts'
+  | 'speakerDiarization';
 
 interface ImportPlan {
   /** 目标模型必需文件（相对源/目的目录），用于导入前后布局校验。 */
   requiredFiles: string[];
   /** 拷贝目的地（绝对路径）。 */
   destDir: string;
+  /** 引擎专用的额外内容校验；默认仅检查 requiredFiles。 */
+  validate?: (dir: string) => { ok: boolean; missing: string[] };
+}
+
+function validateImportLayout(
+  plan: ImportPlan,
+  dir: string,
+): { ok: boolean; missing: string[] } {
+  return plan.validate
+    ? plan.validate(dir)
+    : validateModelLayout(dir, plan.requiredFiles);
 }
 
 /**
  * 解析「从文件夹导入」的校验集与目的地（按指定引擎+模型槽消歧）。
- * - sherpa 三引擎：落 `<engine root>/<dirName>`，校验集取 catalog requiredFiles；
+ * - sherpa ASR 引擎：落 `<engine root>/<dirName>`，校验集取 catalog requiredFiles；
  * - fasterWhisper：落合成快照目录，使 resolveCt2ModelSnapshotDir 命中，校验集为 CT2 关键文件。
  * 返回 null 表示模型 id 非法/缺失。
  */
@@ -136,6 +184,7 @@ function resolveImportPlan(
     return {
       requiredFiles: QWEN_MODELS[id].requiredFiles,
       destDir: path.join(getQwenModelsRoot(), QWEN_MODELS[id].dirName),
+      validate: (dir) => validateQwenModelLayout(id, dir),
     };
   }
   if (engine === 'fireRedAsr') {
@@ -144,6 +193,14 @@ function resolveImportPlan(
     return {
       requiredFiles: FIRERED_MODELS[id].requiredFiles,
       destDir: path.join(getFireRedModelsRoot(), FIRERED_MODELS[id].dirName),
+    };
+  }
+  if (engine === 'parakeet') {
+    const id = (modelId as ParakeetModelId) || PARAKEET_DEFAULT_MODEL_ID;
+    if (!PARAKEET_MODELS[id]) return null;
+    return {
+      requiredFiles: PARAKEET_MODELS[id].requiredFiles,
+      destDir: path.join(getParakeetModelsRoot(), PARAKEET_MODELS[id].dirName),
     };
   }
   if (engine === 'fasterWhisper') {
@@ -156,6 +213,10 @@ function resolveImportPlan(
         'snapshots',
         CT2_IMPORT_SNAPSHOT_REV,
       ),
+      validate: (dir) => {
+        const result = validateCt2ModelSnapshot(dir);
+        return { ok: result.ok, missing: result.issues };
+      },
     };
   }
   if (engine === 'tts') {
@@ -164,6 +225,16 @@ function resolveImportPlan(
     return {
       requiredFiles: TTS_MODELS[id].requiredFiles,
       destDir: path.join(getTtsModelsRoot(), TTS_MODELS[id].dirName),
+    };
+  }
+  if (engine === 'speakerDiarization') {
+    return {
+      requiredFiles: [
+        path.join('pyannote', 'model.onnx'),
+        SPEAKER_DIARIZATION_EMBEDDING_FILE,
+      ],
+      destDir: getSpeakerDiarizationModelDir(),
+      validate: validateSpeakerDiarizationModelDir,
     };
   }
   return null;
@@ -175,7 +246,10 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
   const funasrModelDownloader = getFunasrModelDownloader(mainWindow);
   const qwenModelDownloader = getQwenModelDownloader(mainWindow);
   const fireRedModelDownloader = getFireRedModelDownloader(mainWindow);
+  const parakeetModelDownloader = getParakeetModelDownloader(mainWindow);
   const ttsModelDownloader = getTtsModelDownloader(mainWindow);
+  const speakerDiarizationModelDownloader =
+    getSpeakerDiarizationModelDownloader(mainWindow);
 
   ipcMain.handle('getSystemInfo', async () => {
     // faster-whisper 自包含运行时：已落盘 → ready（附 manifest 版本）；
@@ -188,9 +262,24 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
           version: readEngineManifest('faster-whisper')?.version,
         }
       : { state: 'not_installed' };
+    // 各模型目录来源（默认/统一目录/单独设置），供引擎页 Badge 与恢复跟随（design D8）
+    const settingsSnapshot = store.get('settings');
+    const userDataPath = app.getPath('userData');
+    const sourceOf = (kind: StorageKind) =>
+      resolveModelRoot(kind, settingsSnapshot, userDataPath).source;
     return {
       modelsInstalled: getModelsInstalled(),
       modelsPath: getPath('modelsPath'),
+      userDataPath,
+      storageRoot: settingsSnapshot?.storageRoot?.trim() || '',
+      modelPathSources: {
+        ggml: sourceOf('ggml'),
+        ct2: sourceOf('ct2'),
+        funasr: sourceOf('funasr'),
+        qwen: sourceOf('qwen'),
+        firered: sourceOf('firered'),
+        parakeet: sourceOf('parakeet'),
+      },
       downloadingModels: Array.from(downloadingModels),
       buildInfo: getBuildInfo(),
       totalMemoryGB: Math.round(os.totalmem() / (1024 * 1024 * 1024)),
@@ -209,6 +298,12 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
       fireRedVadInstalled: isFireRedVadInstalled(),
       fireRedModelsInstalled: getInstalledFireRedModels(),
       fireRedModelsPath: getFireRedModelsRoot(),
+      parakeetEngineInstalled: isSherpaLibInstalled(),
+      parakeetVadInstalled: isParakeetVadInstalled(),
+      parakeetModelsInstalled: getInstalledParakeetModels(),
+      parakeetModelsPath: getParakeetModelsRoot(),
+      speakerDiarizationModelInstalled: isSpeakerDiarizationModelInstalled(),
+      speakerDiarizationModelsPath: getSpeakerDiarizationModelsRoot(),
     };
   });
 
@@ -343,6 +438,7 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
     models: (Object.keys(QWEN_MODELS) as QwenModelId[]).map((id) => ({
       id,
       installed: isQwenModelInstalled(id),
+      sources: getQwenSupportedSources(id),
     })),
   }));
 
@@ -352,6 +448,48 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
       // 大模型文件被加载占用导致 rm 失败（worker 会在下次转写/预热时自动重建）。
       getSherpaAsrRuntime().dispose();
       deleteQwenModel(modelId);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle(
+    'downloadSpeakerDiarizationModel',
+    async (
+      _event,
+      { source }: { source?: SpeakerDiarizationModelSource } = {},
+    ) => {
+      if (downloadingModels.size > 0) {
+        return { success: false, error: 'anotherDownloadInProgress' };
+      }
+      downloadingModels.add(SPEAKER_DIARIZATION_PROGRESS_KEY);
+      try {
+        await speakerDiarizationModelDownloader.download(source);
+        downloadingModels.delete(SPEAKER_DIARIZATION_PROGRESS_KEY);
+        return { success: true };
+      } catch (error) {
+        logMessage(
+          `speaker diarization model download error: ${error}`,
+          'error',
+        );
+        downloadingModels.delete(SPEAKER_DIARIZATION_PROGRESS_KEY);
+        return { success: false, error: String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle('getSpeakerDiarizationModelStatus', async () => ({
+    success: true,
+    installed: isSpeakerDiarizationModelInstalled(),
+    runtimeInstalled: isSherpaLibInstalled(),
+    modelsPath: getSpeakerDiarizationModelsRoot(),
+  }));
+
+  ipcMain.handle('deleteSpeakerDiarizationModel', async () => {
+    try {
+      getSpeakerDiarizationRuntime().dispose();
+      deleteSpeakerDiarizationModel();
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -400,6 +538,59 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
         // 大模型文件被加载占用导致 rm 失败（worker 会在下次转写/预热时自动重建）。
         getSherpaAsrRuntime().dispose();
         deleteFireRedModel(modelId);
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'downloadParakeetModel',
+    async (
+      _event,
+      {
+        model,
+        source,
+      }: {
+        model: ParakeetModelId;
+        source?: ParakeetModelSource;
+      },
+    ) => {
+      if (downloadingModels.size > 0) {
+        return { success: false, error: 'anotherDownloadInProgress' };
+      }
+      const progressKey = getParakeetProgressKey(model);
+      downloadingModels.add(progressKey);
+      try {
+        await parakeetModelDownloader.download(model, source);
+        downloadingModels.delete(progressKey);
+        return { success: true };
+      } catch (error) {
+        logMessage(`parakeet model download error: ${error}`, 'error');
+        downloadingModels.delete(progressKey);
+        return { success: false, error: String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle('getParakeetModelStatus', async () => ({
+    success: true,
+    engineInstalled: isSherpaLibInstalled(),
+    vadInstalled: isParakeetVadInstalled(),
+    ready: isParakeetReady(),
+    models: (Object.keys(PARAKEET_MODELS) as ParakeetModelId[]).map((id) => ({
+      id,
+      installed: isParakeetModelInstalled(id),
+    })),
+  }));
+
+  ipcMain.handle(
+    'deleteParakeetModel',
+    async (_event, modelId: ParakeetModelId) => {
+      try {
+        getSherpaAsrRuntime().dispose();
+        deleteParakeetModel(modelId);
         return { success: true };
       } catch (error) {
         return { success: false, error: String(error) };
@@ -476,7 +667,7 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
         source,
         variant,
       }: {
-        scope: 'funasr' | 'qwen' | 'firered' | 'pyEngine' | 'tts';
+        scope: 'funasr' | 'qwen' | 'firered' | 'parakeet' | 'pyEngine' | 'tts';
         modelId?: string;
         source: string;
         variant?: PyEngineVariant;
@@ -497,13 +688,13 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
               url: `${getModelScopeBase()}/models/${spec.modelScopeRepo}`,
             };
           }
-          return {
-            success: true,
-            url: getQwenArchiveUrl(
-              spec,
-              source === 'github' ? 'github' : 'ghproxy',
-            ),
-          };
+          const url = getQwenArchiveUrl(
+            spec,
+            source === 'github' ? 'github' : 'ghproxy',
+          );
+          return url
+            ? { success: true, url }
+            : { success: false, error: 'sourceUnavailable' };
         }
         if (scope === 'firered') {
           const spec = FIRERED_MODELS[modelId as FireRedModelId];
@@ -517,6 +708,17 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
           return {
             success: true,
             url: getFireRedArchiveUrl(
+              spec,
+              source === 'github' ? 'github' : 'ghproxy',
+            ),
+          };
+        }
+        if (scope === 'parakeet') {
+          const spec = PARAKEET_MODELS[modelId as ParakeetModelId];
+          if (!spec) return { success: false, error: 'unknownModel' };
+          return {
+            success: true,
+            url: getParakeetArchiveUrl(
               spec,
               source === 'github' ? 'github' : 'ghproxy',
             ),
@@ -559,7 +761,12 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
     qwenModelDownloader.cancel();
     fireRedModelDownloader.cancel();
     ttsModelDownloader.cancel();
-    downloadingModels.clear();
+    speakerDiarizationModelDownloader.cancel();
+    // Parakeet 等待当前会话真正退出并完成 finally 清理，避免取消后立即重试时
+    // 旧任务清掉新任务的进度键/互斥状态。
+    await parakeetModelDownloader.cancel();
+    // 不提前清空下载锁：各下载 session 在真正响应 abort 并退出后自行移除 key。
+    // 否则 UI 可立即启动新任务，让旧异步链复用新 controller / 混写进度与文件。
     return true;
   });
 
@@ -613,7 +820,7 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
       const srcDir = picked.filePaths[0];
 
       // 导入前校验布局：缺关键文件直接拒绝，不写盘
-      const pre = validateModelLayout(srcDir, plan.requiredFiles);
+      const pre = validateImportLayout(plan, srcDir);
       if (!pre.ok) {
         return {
           success: false,
@@ -622,31 +829,44 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
         };
       }
 
+      const transactionId = randomUUID();
+      const stagedDir = `${plan.destDir}.import-${transactionId}`;
+      const backupDir = `${plan.destDir}.backup-${transactionId}`;
       try {
-        // 覆盖模型目录前先释放对应 worker，避免 Windows 文件锁
-        // （worker 会在下次使用时自动重建）。fasterWhisper 不走 sherpa worker。
+        // 先复制到同父目录 staging 并复校验，失败时不触碰已有模型。
+        await fse.copy(srcDir, stagedDir, { overwrite: true });
+        const post = validateImportLayout(plan, stagedDir);
+        if (!post.ok) {
+          return {
+            success: false,
+            reason: 'invalid-layout',
+            missing: post.missing,
+          };
+        }
+
+        // 仅在 staging 完整后释放 worker 并原子替换；提交失败自动恢复旧目录。
         if (engine === 'tts') {
           getSherpaTtsRuntime().dispose();
+        } else if (engine === 'speakerDiarization') {
+          getSpeakerDiarizationRuntime().dispose();
         } else if (engine !== 'fasterWhisper') {
           getSherpaAsrRuntime().dispose();
         }
-        await fse.ensureDir(plan.destDir);
-        await fse.copy(srcDir, plan.destDir, { overwrite: true });
+        await commitStagedDirectory({
+          stagedDir,
+          destDir: plan.destDir,
+          backupDir,
+          onCleanupWarning: (message) => logMessage(message, 'warning'),
+        });
+        return { success: true };
       } catch (error) {
         logMessage(`import model error: ${error}`, 'error');
         return { success: false, error: String(error) };
+      } finally {
+        // commit 成功后 staging 已被 rename；失败时清理新内容。backup 不在此删除，
+        // 因为极端回滚失败时它是用户旧模型的唯一副本。
+        await fse.remove(stagedDir).catch(() => {});
       }
-
-      // 导入后复校验：拷贝后目的地必须齐备
-      const post = validateModelLayout(plan.destDir, plan.requiredFiles);
-      if (!post.ok) {
-        return {
-          success: false,
-          reason: 'invalid-layout',
-          missing: post.missing,
-        };
-      }
-      return { success: true };
     },
   );
 
@@ -655,7 +875,15 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
     async (
       _event,
       options?: {
-        pathType?: 'ggml' | 'ct2' | 'funasr' | 'qwen' | 'firered' | 'tts';
+        pathType?:
+          | 'ggml'
+          | 'ct2'
+          | 'funasr'
+          | 'qwen'
+          | 'firered'
+          | 'parakeet'
+          | 'tts'
+          | 'speakerDiarization';
       },
     ) => {
       const modelsPath =
@@ -667,9 +895,13 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
               ? getQwenModelsRoot()
               : options?.pathType === 'firered'
                 ? getFireRedModelsRoot()
-                : options?.pathType === 'tts'
-                  ? getTtsModelsRoot()
-                  : (getPath('modelsPath') as string);
+                : options?.pathType === 'parakeet'
+                  ? getParakeetModelsRoot()
+                  : options?.pathType === 'tts'
+                    ? getTtsModelsRoot()
+                    : options?.pathType === 'speakerDiarization'
+                      ? getSpeakerDiarizationModelsRoot()
+                      : (getPath('modelsPath') as string);
       try {
         await fse.ensureDir(modelsPath);
         const err = await shell.openPath(modelsPath);
@@ -687,6 +919,37 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
   // 获取临时目录路径
   ipcMain.handle('getTempDir', async () => {
     return getTempDir();
+  });
+
+  // 打开任意本地目录（存储目录变更对话框「打开旧目录」用；目录不存在时报错、不创建）
+  ipcMain.handle(
+    'openDirectoryPath',
+    async (_event, options?: { path?: string }) => {
+      const target = (options?.path || '').trim();
+      if (!target || !fse.existsSync(target)) {
+        return { success: false, error: 'directory not found' };
+      }
+      const err = await shell.openPath(target);
+      return err ? { success: false, error: err } : { success: true };
+    },
+  );
+
+  // 打开统一存储根目录（未设置时打开 userData 默认基座）
+  ipcMain.handle('openStorageRoot', async () => {
+    const root =
+      (store.get('settings')?.storageRoot || '').trim() ||
+      app.getPath('userData');
+    try {
+      await fse.ensureDir(root);
+      const err = await shell.openPath(root);
+      if (err) {
+        return { success: false, error: err };
+      }
+      return { success: true };
+    } catch (error) {
+      logMessage(`Failed to open storage root: ${error}`, 'error');
+      return { success: false, error: String(error) };
+    }
   });
 
   // 清除缓存

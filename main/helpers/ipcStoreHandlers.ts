@@ -1,7 +1,7 @@
 import { app, ipcMain } from 'electron';
 import os from 'os';
 import { store } from './store';
-import { defaultUserConfig } from './utils';
+import { defaultUserConfig, supportedLanguage } from './utils';
 import { inferDisplayOutcome } from './engines/outcomePresets';
 import { getAndInitializeProviders } from './providerManager';
 import { getAsrProviders, setAsrProviders } from './asrProviderManager';
@@ -26,6 +26,16 @@ import { rebuildAppMenu } from './menu';
 import { shutdownPythonRuntime } from './pythonRuntime';
 import { applyProxyFromSettings } from './network/proxyManager';
 import { syncTaskPowerSaveBlocker } from './powerSaveManager';
+import { omitTaskManuscript } from '../../types/taskConfig';
+import {
+  isFactoryDefaultGgmlPath,
+  resolveModelRoot,
+  resolvePyEnginesRoot,
+  sanitizeStoragePathPatch,
+} from './storagePaths';
+import { sanitizeCustomLanguages } from '../../types/language';
+import { sanitizeSelectedCudaDevice } from '../../types/gpuDevice';
+import { applyCudaDeviceSelection } from './cudaDeviceSelection';
 
 console.log(app.getVersion(), 'version');
 
@@ -42,6 +52,26 @@ export function setupStoreHandlers() {
     });
     logMessage(
       `Migrated GPU settings: useCuda=${currentSettings.useCuda} -> gpuMode=auto`,
+      'info',
+    );
+  }
+
+  // modelsPath 归一化（unified-storage-root, design D4-2）：
+  // 该键曾写在 store defaults 里，绝对默认路径会随任意一次 setSettings 被动持久化，
+  // 与「用户主动自定义」不可区分，导致 whisper.cpp 永远不跟随统一存储目录。
+  // 等于出厂默认（userData/whisper-models）即删除该键，恢复「未覆盖」语义。
+  const settingsForNormalize = store.get('settings');
+  if (
+    settingsForNormalize &&
+    isFactoryDefaultGgmlPath(
+      settingsForNormalize.modelsPath,
+      app.getPath('userData'),
+    )
+  ) {
+    const { modelsPath: _factoryDefault, ...normalized } = settingsForNormalize;
+    store.set('settings', normalized);
+    logMessage(
+      'Normalized legacy default modelsPath; ggml models now follow storageRoot/default chain',
       'info',
     );
   }
@@ -122,15 +152,22 @@ export function setupStoreHandlers() {
   });
 
   // 用户配置相关处理
-  ipcMain.on('setUserConfig', async (event, config) => {
-    store.set('userConfig', config);
+  ipcMain.on('setUserConfig', async (_event, config) => {
+    store.set('userConfig', omitTaskManuscript(config));
   });
 
   ipcMain.handle('getUserConfig', async () => {
     const storedConfig = store.get('userConfig');
+    const reusableConfig = omitTaskManuscript(storedConfig);
+    if (
+      storedConfig &&
+      ('manuscriptPath' in storedConfig || 'manuscriptName' in storedConfig)
+    ) {
+      store.set('userConfig', reusableConfig);
+    }
     const merged: Record<string, unknown> = {
       ...defaultUserConfig,
-      ...storedConfig,
+      ...reusableConfig,
     };
     // 字幕效果默认档：缺省时按既有旋钮惰性推断（全新/默认→均衡；老用户自定义→对应档或
     // custom，逐字保留行为）。在此补齐而非写 store 默认值，避免回灌覆盖老用户底层旋钮。
@@ -146,35 +183,87 @@ export function setupStoreHandlers() {
   // 设置相关处理
   ipcMain.handle('setSettings', async (event, settings) => {
     const preSettings = store.get('settings');
-    store.set('settings', { ...preSettings, ...settings });
+    // 中文路径兜底（design D6-2）：渲染层选路校验是主执法，此处防旁路写入
+    const { sanitized, rejectedKeys } = sanitizeStoragePathPatch(settings);
+    if (rejectedKeys.length > 0) {
+      logMessage(
+        `Rejected storage path keys containing CJK characters: ${rejectedKeys.join(', ')}`,
+        'warning',
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(sanitized, 'customLanguages')) {
+      sanitized.customLanguages = sanitizeCustomLanguages(
+        sanitized.customLanguages,
+        supportedLanguage.map((language) => language.value),
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(sanitized, 'selectedCudaDevice')) {
+      sanitized.selectedCudaDevice = sanitizeSelectedCudaDevice(
+        sanitized.selectedCudaDevice,
+      );
+    }
+    const nextSettings = { ...preSettings, ...sanitized };
+    store.set('settings', nextSettings);
     if (
-      settings?.proxyMode !== undefined ||
-      settings?.proxyUrl !== undefined ||
-      settings?.proxyNoProxy !== undefined
+      sanitized?.proxyMode !== undefined ||
+      sanitized?.proxyUrl !== undefined ||
+      sanitized?.proxyNoProxy !== undefined
     ) {
       applyProxyFromSettings();
     }
-    if (settings?.preventSleepDuringTask !== undefined) {
+    if (sanitized?.preventSleepDuringTask !== undefined) {
       syncTaskPowerSaveBlocker();
     }
-    if (
-      settings?.fasterWhisperModelsPath &&
-      settings.fasterWhisperModelsPath !== preSettings?.fasterWhisperModelsPath
-    ) {
+    // Python 运行时重启判定：比较 CT2 模型根与自包含运行时根写入前后的变化。
+    // 运行时根单独比较很重要：即使 CT2 有独立覆盖，storageRoot 变化仍会把
+    // py-engines 切到新位置，必须先停掉旧目录中的进程并释放文件句柄。
+    const userDataPath = app.getPath('userData');
+    const preCt2Root = resolveModelRoot('ct2', preSettings, userDataPath).path;
+    const nextCt2Root = resolveModelRoot(
+      'ct2',
+      nextSettings,
+      userDataPath,
+    ).path;
+    const preRuntimeRoot = resolvePyEnginesRoot(preSettings, userDataPath).path;
+    const nextRuntimeRoot = resolvePyEnginesRoot(
+      nextSettings,
+      userDataPath,
+    ).path;
+    if (preCt2Root !== nextCt2Root || preRuntimeRoot !== nextRuntimeRoot) {
       await shutdownPythonRuntime();
+      const changes = [
+        preCt2Root !== nextCt2Root
+          ? `models ${preCt2Root} -> ${nextCt2Root}`
+          : '',
+        preRuntimeRoot !== nextRuntimeRoot
+          ? `runtime ${preRuntimeRoot} -> ${nextRuntimeRoot}`
+          : '',
+      ].filter(Boolean);
       logMessage(
-        `faster-whisper models path changed, python engine restarted`,
+        `faster-whisper storage changed (${changes.join('; ')}), python engine restarted`,
         'info',
       );
     }
     // 语言切换后重建应用菜单
-    if (settings?.language && settings.language !== preSettings?.language) {
-      rebuildAppMenu(settings.language);
+    if (
+      typeof sanitized?.language === 'string' &&
+      sanitized.language !== preSettings?.language
+    ) {
+      rebuildAppMenu(sanitized.language);
     }
+    return { rejectedKeys };
   });
 
   ipcMain.handle('getSettings', async () => {
     return store.get('settings');
+  });
+
+  ipcMain.handle('restart-app', async () => {
+    const settings = store.get('settings');
+    applyCudaDeviceSelection(settings?.selectedCudaDevice);
+    app.relaunch();
+    setImmediate(() => app.quit());
+    return { success: true };
   });
 
   // 日志相关处理（按日 JSONL 文件存储，见 logStorage.ts）

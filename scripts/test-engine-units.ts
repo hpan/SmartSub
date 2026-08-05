@@ -17,6 +17,12 @@ import {
   secondsToSrtTime,
   getVadSettings,
 } from '../main/helpers/engines/transcribeShared';
+import {
+  buildFasterWhisperAdvancedParams,
+  FASTER_WHISPER_ADVANCED_PARAM_SPECS,
+  isValidFasterWhisperAdvancedParamValue,
+  supportsFasterWhisperAdvancedParams,
+} from '../types/transcriptionParams';
 import { toFasterWhisperModel } from '../main/helpers/engines/modelMap';
 import {
   isProtocolSupported,
@@ -47,6 +53,7 @@ import {
   toFriendlyFfmpegError,
 } from '../main/helpers/ffmpegErrorUtils';
 import fs from 'fs';
+import http from 'http';
 import os from 'os';
 import nodePath from 'path';
 import {
@@ -54,19 +61,48 @@ import {
   resolveFunasrAsrSelection,
   FUNASR_MODELS,
 } from '../main/helpers/funasrModelCatalog';
-import { QWEN_MODELS } from '../main/helpers/qwenModelCatalog';
-import { FIRERED_MODELS } from '../main/helpers/fireRedModelCatalog';
 import {
+  QWEN_MODELS,
+  getQwenArchiveUrl,
+  getQwenModelIds,
+  getQwenSourceOrder,
+  getQwenSupportedSources,
+  getQwenRequiredFileExpectations,
+  getQwenModelScopeFileUrl,
+  getQwenModelScopeTreeUrl,
+  resolveQwenSelection,
+} from '../main/helpers/qwenModelCatalog';
+import { FIRERED_MODELS } from '../main/helpers/fireRedModelCatalog';
+import { PARAKEET_MODELS } from '../main/helpers/parakeetModelCatalog';
+import {
+  CT2_REQUIRED_FILES,
+  CT2_REQUIRED_CONFIG_ARRAYS,
+  inspectCt2SnapshotRoot,
   validateModelLayout,
+  validateModelLayoutWithSizes,
+  validateCt2ModelSnapshot,
   resolveOverridePath,
   resolveBundledVadPath,
   SHERPA_VAD_SUBPATH,
 } from '../main/helpers/modelImport';
 import {
+  assertFileSize,
+  prepareDownloadTarget,
+  validateDownloadResponse,
+} from '../main/helpers/download/resumeIntegrity';
+import { commitStagedDirectory } from '../main/helpers/download/atomicDirectoryInstall';
+import { DownloadSessionTracker } from '../main/helpers/download/downloadSession';
+import {
+  downloadFileSingle,
+  SINGLE_DOWNLOAD_CANCELLED,
+} from '../main/helpers/download/singleFileDownloader';
+import { fetchJson } from '../main/helpers/download/fetchJson';
+import {
   buildVadConfig,
   buildRecognizerConfig,
   buildQwenRecognizerConfig,
   buildFireRedRecognizerConfig,
+  buildParakeetRecognizerConfig,
   segmentTiming,
   progressPercent,
 } from '../main/helpers/sherpaOnnx/sherpaConfig';
@@ -77,11 +113,18 @@ import {
   FIRERED_HARD_MAX_SPEECH_S,
   FIRERED_DEFAULT_MAX_SPEECH_S,
 } from '../main/helpers/engines/fireRedParams';
+import { buildParakeetParams } from '../main/helpers/engines/parakeetParams';
 import {
   getSelectableModelsForEngine,
   getInstalledModelsForEngine,
+  getEngineModelGroups,
   hasModelsForEngine,
+  hasAnyModelAnyEngine,
 } from '../renderer/lib/engineModels';
+import {
+  formatFunasrDownloadFailureToast,
+  isFunasrDownloadCancelled,
+} from '../renderer/lib/funasrDownloadError';
 import {
   tokensToTriples,
   wordsToTriples,
@@ -135,6 +178,18 @@ import {
   LOCAL_ENGINE_VIEWS,
 } from '../renderer/lib/engineViews';
 import { computeChunkBoundaries } from '../main/helpers/cloudAudioChunking';
+import {
+  planEvenChunkTargets,
+  silenceThresholdDb,
+  pickSilenceCut,
+  boundariesFromCuts,
+  offsetNativeTokens,
+  offsetVadSegments,
+  offsetSegmentCues,
+  chunkedProgressPercent,
+  BUILTIN_CHUNK_ACTIVATE_SECONDS,
+} from '../main/helpers/builtinAudioChunking';
+import { windowFrameDb } from '../main/helpers/wavWindowEnergy';
 import {
   needsSpaceBefore,
   realignPunctuation,
@@ -222,6 +277,17 @@ import {
   isGladiaJobGone,
   extractGladiaResult,
 } from '../main/service/asr/gladiaUtils';
+import {
+  parseNvidiaSmiGpuList,
+  resolveSelectedCudaGpu,
+  sanitizeSelectedCudaDevice,
+  selectableNvidiaGpus,
+} from '../types/gpuDevice';
+import {
+  applyCudaDeviceSelection,
+  resolveStartupCudaDeviceSelection,
+} from '../main/helpers/cudaDeviceSelection';
+import { isPinnedTaskConfigSnapshot } from '../types/taskSnapshot';
 
 let passed = 0;
 let failed = 0;
@@ -236,6 +302,147 @@ function eq(actual: unknown, expected: unknown, name: string): void {
     console.error(`✗ ${name}\n    expected: ${e}\n    actual:   ${a}`);
   }
 }
+
+// --- CUDA multi-GPU selection ---
+const parsedCudaGpus = parseNvidiaSmiGpuList(
+  [
+    '0, GPU-aaaa-1111, NVIDIA GeForce RTX 4090',
+    '1, GPU-bbbb-2222, NVIDIA RTX 6000, Ada Generation',
+    'invalid row',
+  ].join('\n'),
+);
+eq(
+  parsedCudaGpus,
+  [
+    {
+      name: 'NVIDIA GeForce RTX 4090',
+      vendor: 'nvidia',
+      index: 0,
+      uuid: 'GPU-aaaa-1111',
+    },
+    {
+      name: 'NVIDIA RTX 6000, Ada Generation',
+      vendor: 'nvidia',
+      index: 1,
+      uuid: 'GPU-bbbb-2222',
+    },
+  ],
+  'cuda device: parse stable index/uuid/name list',
+);
+eq(
+  sanitizeSelectedCudaDevice(' GPU-aaaa-1111 '),
+  'GPU-aaaa-1111',
+  'cuda device: sanitize valid UUID',
+);
+eq(
+  sanitizeSelectedCudaDevice('0; remove-item'),
+  '',
+  'cuda device: reject non-UUID value',
+);
+eq(
+  selectableNvidiaGpus([
+    ...parsedCudaGpus,
+    { name: 'Intel Arc', vendor: 'intel' },
+    { name: 'NVIDIA without UUID', vendor: 'nvidia' },
+  ]).length,
+  2,
+  'cuda device: expose only addressable NVIDIA GPUs',
+);
+eq(
+  resolveSelectedCudaGpu(parsedCudaGpus, 'GPU-BBBB-2222')?.index,
+  1,
+  'cuda device: resolve UUID case-insensitively',
+);
+eq(
+  resolveStartupCudaDeviceSelection('GPU-aaaa-1111', {
+    status: 'success',
+    gpus: [],
+  }),
+  { selectedDevice: '', clearPersistedSelection: true },
+  'cuda device: successful zero-card enumeration clears stale selection',
+);
+eq(
+  resolveStartupCudaDeviceSelection('GPU-aaaa-1111', {
+    status: 'failed',
+    gpus: [],
+  }),
+  {
+    selectedDevice: 'GPU-aaaa-1111',
+    clearPersistedSelection: false,
+  },
+  'cuda device: failed enumeration preserves selection',
+);
+{
+  const inheritedEnv: NodeJS.ProcessEnv = {
+    NODE_ENV: 'test',
+    CUDA_VISIBLE_DEVICES: '2',
+  };
+  eq(
+    applyCudaDeviceSelection('GPU-aaaa-1111', inheritedEnv),
+    'GPU-aaaa-1111',
+    'cuda device: apply selected UUID',
+  );
+  eq(
+    inheritedEnv.CUDA_VISIBLE_DEVICES,
+    'GPU-aaaa-1111',
+    'cuda device: selected UUID reaches child environment',
+  );
+  applyCudaDeviceSelection('', inheritedEnv);
+  eq(
+    inheritedEnv.CUDA_VISIBLE_DEVICES,
+    '2',
+    'cuda device: auto restores inherited visibility',
+  );
+}
+{
+  const cleanEnv: NodeJS.ProcessEnv = { NODE_ENV: 'test' };
+  applyCudaDeviceSelection('GPU-bbbb-2222', cleanEnv);
+  applyCudaDeviceSelection('', cleanEnv);
+  eq(
+    cleanEnv.CUDA_VISIBLE_DEVICES,
+    undefined,
+    'cuda device: auto removes SmartSub-only visibility',
+  );
+}
+{
+  const inheritedEmptyEnv: NodeJS.ProcessEnv = {
+    NODE_ENV: 'test',
+    CUDA_VISIBLE_DEVICES: '',
+  };
+  applyCudaDeviceSelection('GPU-aaaa-1111', inheritedEmptyEnv);
+  const relaunchedEnv = { ...inheritedEmptyEnv };
+  applyCudaDeviceSelection('', relaunchedEnv);
+  eq(
+    relaunchedEnv.CUDA_VISIBLE_DEVICES,
+    '',
+    'cuda device: auto restores inherited empty visibility across relaunch',
+  );
+}
+
+// --- task config snapshot pinning ---
+eq(
+  isPinnedTaskConfigSnapshot({ speakerDiarization: true }),
+  true,
+  'task snapshot: enabled diarization pins an otherwise plain subtitle task',
+);
+eq(
+  isPinnedTaskConfigSnapshot({
+    speakerDiarization: true,
+    speakerDiarizationCount: 4,
+  }),
+  true,
+  'task snapshot: known speaker count remains part of a pinned snapshot',
+);
+eq(
+  isPinnedTaskConfigSnapshot({ speakerDiarization: false }),
+  false,
+  'task snapshot: disabled diarization keeps a plain task editable',
+);
+eq(
+  isPinnedTaskConfigSnapshot({ dub: { engine: 'local' } }),
+  true,
+  'task snapshot: existing dubbing pinning remains supported',
+);
 
 // --- secondsToSrtTime ---
 eq(secondsToSrtTime(0), '00:00:00.000', 'srt: zero');
@@ -278,6 +485,120 @@ eq(
   getVadSettings({ vadThreshold: 0.8 }).vadThreshold,
   0.8,
   'vad: custom threshold passthrough',
+);
+
+// --- faster-whisper advanced transcription params ---
+eq(
+  buildFasterWhisperAdvancedParams({}),
+  {},
+  'faster advanced: unset preserves engine defaults',
+);
+eq(
+  buildFasterWhisperAdvancedParams({
+    fasterWhisperBeamSize: 6,
+    fasterWhisperBestOf: 4,
+    fasterWhisperTemperature: 0.4,
+    fasterWhisperCompressionRatioThreshold: 2.8,
+    fasterWhisperLogProbThreshold: -0.8,
+    fasterWhisperNoSpeechThreshold: 0.7,
+  }),
+  {
+    beam_size: 6,
+    best_of: 4,
+    temperature: 0.4,
+    compression_ratio_threshold: 2.8,
+    log_prob_threshold: -0.8,
+    no_speech_threshold: 0.7,
+  },
+  'faster advanced: valid task values map to sidecar keys',
+);
+eq(
+  buildFasterWhisperAdvancedParams({
+    fasterWhisperBeamSize: 1,
+    fasterWhisperBestOf: 20,
+    fasterWhisperTemperature: 0,
+    fasterWhisperCompressionRatioThreshold: 10,
+    fasterWhisperLogProbThreshold: -5,
+    fasterWhisperNoSpeechThreshold: 1,
+  }),
+  {
+    beam_size: 1,
+    best_of: 20,
+    temperature: 0,
+    compression_ratio_threshold: 10,
+    log_prob_threshold: -5,
+    no_speech_threshold: 1,
+  },
+  'faster advanced: inclusive range boundaries are accepted',
+);
+eq(
+  buildFasterWhisperAdvancedParams({
+    fasterWhisperBeamSize: 0,
+    fasterWhisperBestOf: 21,
+    fasterWhisperTemperature: 1.1,
+    fasterWhisperCompressionRatioThreshold: -0.1,
+    fasterWhisperLogProbThreshold: 0.1,
+    fasterWhisperNoSpeechThreshold: NaN,
+  }),
+  {},
+  'faster advanced: non-finite and out-of-range values are ignored',
+);
+eq(
+  buildFasterWhisperAdvancedParams({
+    fasterWhisperBeamSize: 1.5,
+    fasterWhisperBestOf: 2.2,
+    fasterWhisperTemperature: 0.5,
+  }),
+  { temperature: 0.5 },
+  'faster advanced: fractional integer parameters are rejected',
+);
+eq(
+  buildFasterWhisperAdvancedParams({
+    fasterWhisperTemperature: '0.4',
+    fasterWhisperCompressionRatioThreshold: null,
+  }),
+  {},
+  'faster advanced: non-number values are ignored',
+);
+eq(
+  FASTER_WHISPER_ADVANCED_PARAM_SPECS.map((spec) => spec.engineDefault),
+  [5, 5, [0, 0.2, 0.4, 0.6, 0.8, 1], 2.4, -1, 0.6],
+  'faster advanced: documented defaults match faster-whisper',
+);
+eq(
+  isValidFasterWhisperAdvancedParamValue(
+    5,
+    FASTER_WHISPER_ADVANCED_PARAM_SPECS[0],
+  ),
+  true,
+  'faster advanced: integer validator accepts whole numbers',
+);
+eq(
+  isValidFasterWhisperAdvancedParamValue(
+    5.5,
+    FASTER_WHISPER_ADVANCED_PARAM_SPECS[0],
+  ),
+  false,
+  'faster advanced: integer validator rejects fractions',
+);
+eq(
+  supportsFasterWhisperAdvancedParams('fasterWhisper'),
+  true,
+  'faster advanced: faster-whisper capability enabled',
+);
+eq(
+  [
+    'builtin',
+    'localCli',
+    'funasr',
+    'qwen',
+    'fireRedAsr',
+    'parakeet',
+    'cloud',
+    undefined,
+  ].some(supportsFasterWhisperAdvancedParams),
+  false,
+  'faster advanced: unsupported engines do not expose controls',
 );
 
 // --- toFasterWhisperModel ---
@@ -845,17 +1166,17 @@ const qwenReady = {
   transcriptionEngine: 'qwen' as const,
   qwenEngineInstalled: true,
   qwenVadInstalled: true,
-  qwenModelsInstalled: ['qwen3-asr-0.6b'],
+  qwenModelsInstalled: ['qwen3-asr-0.6b', 'qwen3-asr-1.7b'],
 };
 eq(
   getSelectableModelsForEngine(qwenReady),
-  ['qwen3-asr-0.6b'],
-  'engineModels: qwen selectable = installed qwen models',
+  ['qwen3-asr-0.6b', 'qwen3-asr-1.7b'],
+  'engineModels: qwen selectable includes both installed model sizes',
 );
 eq(
   getInstalledModelsForEngine(qwenReady),
-  ['qwen3-asr-0.6b'],
-  'engineModels: qwen installed = installed qwen models',
+  ['qwen3-asr-0.6b', 'qwen3-asr-1.7b'],
+  'engineModels: qwen installed includes both installed model sizes',
 );
 eq(
   hasModelsForEngine(qwenReady),
@@ -1096,6 +1417,140 @@ eq(
   'sherpa: fire_red_asr has no qwen3Asr block',
 );
 
+// --- engineModels/catalog: NVIDIA Parakeet awareness ---
+const parakeetReady = {
+  transcriptionEngine: 'parakeet' as const,
+  parakeetEngineInstalled: true,
+  parakeetVadInstalled: true,
+  parakeetModelsInstalled: ['parakeet-tdt-0.6b-v3'],
+};
+eq(
+  getSelectableModelsForEngine(parakeetReady),
+  ['parakeet-tdt-0.6b-v3'],
+  'engineModels: parakeet selectable = installed models',
+);
+eq(
+  getInstalledModelsForEngine(parakeetReady),
+  ['parakeet-tdt-0.6b-v3'],
+  'engineModels: parakeet installed = installed models',
+);
+eq(
+  hasModelsForEngine(parakeetReady),
+  true,
+  'engineModels: parakeet ready w/ vad+model',
+);
+eq(
+  getEngineModelGroups(parakeetReady),
+  [
+    {
+      engine: 'parakeet',
+      models: ['parakeet-tdt-0.6b-v3'],
+    },
+  ],
+  'engineModels: parakeet appears in task model groups',
+);
+eq(
+  hasAnyModelAnyEngine(parakeetReady),
+  true,
+  'engineModels: parakeet satisfies cross-engine readiness',
+);
+eq(
+  hasModelsForEngine({
+    transcriptionEngine: 'parakeet',
+    parakeetVadInstalled: false,
+    parakeetModelsInstalled: ['parakeet-tdt-0.6b-v3'],
+  }),
+  false,
+  'engineModels: parakeet not ready without vad',
+);
+eq(
+  hasModelsForEngine({
+    transcriptionEngine: 'parakeet',
+    parakeetVadInstalled: true,
+    parakeetModelsInstalled: [],
+  }),
+  false,
+  'engineModels: parakeet not ready without model',
+);
+eq(
+  PARAKEET_MODELS['parakeet-tdt-0.6b-v3'].requiredFiles,
+  ['encoder.int8.onnx', 'decoder.int8.onnx', 'joiner.int8.onnx', 'tokens.txt'],
+  'parakeet: catalog validates the complete int8 transducer layout',
+);
+eq(
+  {
+    upstreamModel: PARAKEET_MODELS['parakeet-tdt-0.6b-v3'].upstreamModel,
+    license: PARAKEET_MODELS['parakeet-tdt-0.6b-v3'].license,
+    languageCount: PARAKEET_MODELS['parakeet-tdt-0.6b-v3'].languageCount,
+    supportsPunctuation:
+      PARAKEET_MODELS['parakeet-tdt-0.6b-v3'].supportsPunctuation,
+  },
+  {
+    upstreamModel: 'nvidia/parakeet-tdt-0.6b-v3',
+    license: 'CC-BY-4.0',
+    languageCount: 25,
+    supportsPunctuation: true,
+  },
+  'parakeet: catalog exposes upstream capability and license metadata',
+);
+
+const PARAKEET_RP = { num_threads: 4, provider: 'cpu' };
+const parakeetRecognizerConfig = buildParakeetRecognizerConfig(
+  {
+    encoder: '/m/encoder.int8.onnx',
+    decoder: '/m/decoder.int8.onnx',
+    joiner: '/m/joiner.int8.onnx',
+  },
+  '/m/tokens.txt',
+  PARAKEET_RP,
+);
+eq(
+  parakeetRecognizerConfig.modelConfig.transducer,
+  {
+    encoder: '/m/encoder.int8.onnx',
+    decoder: '/m/decoder.int8.onnx',
+    joiner: '/m/joiner.int8.onnx',
+  },
+  'sherpa: parakeet maps encoder+decoder+joiner',
+);
+eq(
+  parakeetRecognizerConfig.modelConfig.tokens,
+  '/m/tokens.txt',
+  'sherpa: parakeet uses top-level tokens',
+);
+eq(
+  parakeetRecognizerConfig.modelConfig.modelType,
+  'nemo_transducer',
+  'sherpa: parakeet explicitly selects nemo_transducer',
+);
+eq(
+  buildParakeetParams({}),
+  {
+    provider: 'cpu',
+    num_threads: 2,
+    vad_threshold: 0.5,
+    vad_min_silence_duration_ms: 100,
+    vad_min_speech_duration_ms: 250,
+    vad_max_speech_duration_s: 0,
+  },
+  'parakeet: default params reuse shared VAD defaults',
+);
+eq(
+  buildParakeetParams({
+    parakeetProvider: 'cuda',
+    parakeetNumThreads: 8,
+  }),
+  {
+    provider: 'cuda',
+    num_threads: 8,
+    vad_threshold: 0.5,
+    vad_min_silence_duration_ms: 100,
+    vad_min_speech_duration_ms: 250,
+    vad_max_speech_duration_s: 0,
+  },
+  'parakeet: provider and threads passthrough',
+);
+
 // --- fireRedParams: 默认值 + 段长安全闸（design D8） ---
 eq(
   buildFireRedParams({}),
@@ -1170,7 +1625,44 @@ eq(
     true,
     'import: present nested file -> ok',
   );
+  fs.writeFileSync(nodePath.join(tmp, 'empty.onnx'), '');
+  fs.mkdirSync(nodePath.join(tmp, 'directory.onnx'));
+  eq(
+    validateModelLayout(tmp, ['empty.onnx', 'directory.onnx']).missing,
+    ['empty.onnx', 'directory.onnx'],
+    'import: empty files and directories are rejected',
+  );
+  eq(
+    validateModelLayoutWithSizes(tmp, [
+      { path: 'encoder.int8.onnx', size: 1 },
+      { path: 'decoder.int8.onnx', size: 2 },
+    ]).missing,
+    ['decoder.int8.onnx'],
+    'import: exact-size validation reports wrong-sized files',
+  );
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// --- downloadSession: stale finally 不能清掉新会话 ---
+{
+  const tracker = new DownloadSessionTracker();
+  const oldSession = tracker.begin();
+  const newSession = tracker.begin();
+  eq(
+    tracker.finish(oldSession),
+    false,
+    'download session: stale completion does not own active session',
+  );
+  eq(
+    tracker.owns(newSession),
+    true,
+    'download session: new session survives stale completion',
+  );
+  eq(
+    tracker.finish(newSession),
+    true,
+    'download session: active completion clears its own session',
+  );
 }
 
 // --- modelImport: resolveOverridePath（覆盖优先/空值回退） ---
@@ -1194,6 +1686,136 @@ eq(
   '/default/models',
   'path: whitespace -> fallback',
 );
+
+// --- CT2 模型完整性：残缺快照不算已安装，完整快照优先 ---
+{
+  const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'ct2-integrity-'));
+  const snapshots = nodePath.join(tmp, 'snapshots');
+  const incomplete = nodePath.join(snapshots, 'a-incomplete');
+  const complete = nodePath.join(snapshots, 'b-complete');
+  fs.mkdirSync(incomplete, { recursive: true });
+  fs.mkdirSync(complete, { recursive: true });
+  fs.writeFileSync(nodePath.join(incomplete, 'model.bin'), 'model');
+  fs.writeFileSync(nodePath.join(complete, 'model.bin'), 'model');
+  fs.writeFileSync(
+    nodePath.join(complete, 'config.json'),
+    JSON.stringify({
+      lang_ids: [],
+      suppress_ids: [],
+      suppress_ids_begin: [],
+    }),
+  );
+
+  eq(
+    CT2_REQUIRED_FILES,
+    ['model.bin', 'config.json'],
+    'ct2 integrity: minimum required files stay centralized',
+  );
+  eq(
+    CT2_REQUIRED_CONFIG_ARRAYS,
+    ['lang_ids', 'suppress_ids', 'suppress_ids_begin'],
+    'ct2 integrity: native config arrays stay centralized',
+  );
+  eq(
+    validateCt2ModelSnapshot(incomplete).issues,
+    ['config.json is missing'],
+    'ct2 integrity: missing config is diagnosed',
+  );
+  eq(
+    inspectCt2SnapshotRoot(snapshots).snapshotDir,
+    complete,
+    'ct2 integrity: complete snapshot wins over earlier incomplete snapshot',
+  );
+
+  fs.writeFileSync(nodePath.join(complete, 'config.json'), 'null');
+  eq(
+    validateCt2ModelSnapshot(complete).issues,
+    ['config.json is invalid'],
+    'ct2 integrity: null config is rejected before native runtime',
+  );
+  fs.writeFileSync(nodePath.join(complete, 'config.json'), '{}');
+  eq(
+    validateCt2ModelSnapshot(complete).issues,
+    [
+      'config.json.lang_ids is missing or invalid',
+      'config.json.suppress_ids is missing or invalid',
+      'config.json.suppress_ids_begin is missing or invalid',
+    ],
+    'ct2 integrity: missing native config arrays are diagnosed',
+  );
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// --- CT2 下载恢复：最终文件按大小校验，短文件续传，错误 Range 拒绝 ---
+{
+  const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'ct2-resume-'));
+  const dest = nodePath.join(tmp, 'model.bin');
+  const partial = `${dest}.download`;
+
+  fs.writeFileSync(dest, 'abc');
+  eq(
+    prepareDownloadTarget(dest, partial, 5),
+    { complete: false, startByte: 3 },
+    'ct2 resume: short final file becomes resumable temp file',
+  );
+  eq(
+    [fs.existsSync(dest), fs.statSync(partial).size],
+    [false, 3],
+    'ct2 resume: incomplete final file is never skipped',
+  );
+
+  fs.writeFileSync(partial, 'abcdef');
+  eq(
+    prepareDownloadTarget(dest, partial, 5),
+    { complete: false, startByte: 0 },
+    'ct2 resume: oversized temp file is discarded',
+  );
+
+  fs.writeFileSync(dest, 'abcde');
+  eq(
+    prepareDownloadTarget(dest, partial, 5),
+    { complete: true, startByte: 0 },
+    'ct2 resume: exact-size final file may be skipped',
+  );
+  assertFileSize(dest, 5);
+
+  fs.writeFileSync(dest, 'abc');
+  let shortFileError = '';
+  try {
+    assertFileSize(dest, 5, 'model.bin');
+  } catch (error) {
+    shortFileError = error instanceof Error ? error.message : String(error);
+  }
+  eq(
+    shortFileError.includes('size mismatch'),
+    true,
+    'ct2 resume: early EOF cannot pass final size check',
+  );
+
+  eq(
+    validateDownloadResponse(200, undefined, 3, 5),
+    'restart',
+    'ct2 resume: ignored Range restarts from zero',
+  );
+  eq(
+    validateDownloadResponse(206, 'bytes 3-4/5', 3, 5),
+    'accept',
+    'ct2 resume: matching Content-Range is accepted',
+  );
+  let rangeError = '';
+  try {
+    validateDownloadResponse(206, 'bytes 2-4/5', 3, 5);
+  } catch (error) {
+    rangeError = error instanceof Error ? error.message : String(error);
+  }
+  eq(
+    rangeError.includes('Content-Range mismatch'),
+    true,
+    'ct2 resume: mismatched Content-Range is rejected',
+  );
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
 
 // --- modelImport: 内置共享 VAD 路径（随包内置，与引擎模型根解耦） ---
 eq(
@@ -1219,10 +1841,186 @@ eq(
   'import: qwen requiredFiles include nested tokenizer file',
 );
 eq(
+  QWEN_MODELS['qwen3-asr-1.7b'].requiredFiles,
+  QWEN_MODELS['qwen3-asr-0.6b'].requiredFiles,
+  'import: qwen model sizes share the same runtime layout',
+);
+eq(
+  QWEN_MODELS['qwen3-asr-1.7b'].requiredFiles.includes(
+    'tokenizer/tokenizer_config.json',
+  ),
+  true,
+  'import: qwen runtime marker includes required tokenizer_config.json',
+);
+{
+  const qwen06Sizes = Object.fromEntries(
+    getQwenRequiredFileExpectations('qwen3-asr-0.6b').map((file) => [
+      file.path,
+      file.size,
+    ]),
+  );
+  const qwen17Sizes = Object.fromEntries(
+    getQwenRequiredFileExpectations('qwen3-asr-1.7b').map((file) => [
+      file.path,
+      file.size,
+    ]),
+  );
+  eq(
+    qwen06Sizes['decoder.int8.onnx'],
+    755_914_231,
+    'qwen catalog: 0.6B decoder has pinned official size',
+  );
+  eq(
+    qwen17Sizes['decoder.int8.onnx'],
+    2_037_458_645,
+    'qwen catalog: 1.7B decoder has pinned official size',
+  );
+  eq(
+    qwen17Sizes['decoder.int8.onnx'] === qwen06Sizes['decoder.int8.onnx'],
+    false,
+    'qwen import: 0.6B decoder cannot satisfy the 1.7B slot identity',
+  );
+  eq(
+    qwen17Sizes['tokenizer/tokenizer_config.json'],
+    12_487,
+    'qwen catalog: tokenizer_config has pinned official size',
+  );
+}
+eq(
+  QWEN_MODELS['qwen3-asr-1.7b'].modelScopeFiles
+    .map((file) => file.remote)
+    .slice(0, 3),
+  [
+    'model_1.7B/conv_frontend.onnx',
+    'model_1.7B/encoder.int8.onnx',
+    'model_1.7B/decoder.int8.onnx',
+  ],
+  'qwen catalog: 1.7B points at the official int8 ModelScope layout',
+);
+eq(
+  QWEN_MODELS['qwen3-asr-1.7b'].modelScopeFiles.reduce(
+    (total, file) => total + file.size,
+    0,
+  ),
+  2_404_230_105,
+  'qwen catalog: 1.7B pinned files total 2.404 GB',
+);
+eq(
+  getQwenModelScopeFileUrl(
+    QWEN_MODELS['qwen3-asr-1.7b'],
+    'model_1.7B/decoder.int8.onnx',
+  ).includes('/resolve/master/'),
+  false,
+  'qwen catalog: file downloads use an immutable revision',
+);
+eq(
+  getQwenModelScopeTreeUrl(QWEN_MODELS['qwen3-asr-1.7b']).includes(
+    'Revision=master',
+  ),
+  false,
+  'qwen catalog: tree metadata uses the same immutable revision',
+);
+eq(
+  getQwenModelIds(),
+  ['qwen3-asr-0.6b', 'qwen3-asr-1.7b'],
+  'qwen catalog: exposes both 0.6B and 1.7B',
+);
+eq(
+  getQwenSupportedSources('qwen3-asr-0.6b'),
+  ['modelscope', 'ghproxy', 'github'],
+  'qwen catalog: 0.6B retains all download sources',
+);
+eq(
+  getQwenSupportedSources('qwen3-asr-1.7b'),
+  ['modelscope'],
+  'qwen catalog: 1.7B only exposes its available ModelScope source',
+);
+eq(
+  getQwenArchiveUrl(QWEN_MODELS['qwen3-asr-1.7b'], 'github'),
+  null,
+  'qwen catalog: 1.7B never fabricates a missing GitHub archive URL',
+);
+eq(
+  getQwenSourceOrder('github', getQwenSupportedSources('qwen3-asr-1.7b')),
+  ['modelscope'],
+  'qwen catalog: unsupported 1.7B source safely falls back to ModelScope',
+);
+eq(
+  resolveQwenSelection('qwen3-asr-1.7b', ['qwen3-asr-0.6b', 'qwen3-asr-1.7b']),
+  { id: 'qwen3-asr-1.7b' },
+  'qwen selection: requested installed 1.7B reaches the runtime',
+);
+eq(
+  resolveQwenSelection('qwen3-asr-1.7b', ['qwen3-asr-0.6b']),
+  { id: 'qwen3-asr-0.6b' },
+  'qwen selection: missing 1.7B falls back to an installed model',
+);
+eq(
   FIRERED_MODELS['fire-red-asr-large-zh-en'].requiredFiles,
   ['encoder.int8.onnx', 'decoder.int8.onnx', 'tokens.txt'],
   'import: fireRed requiredFiles',
 );
+
+// --- funasr download failure: surface manual fallback next step ---
+{
+  const translations: Record<string, string> = {
+    'engines.funasr.downloadFailed': 'FunASR model download failed',
+    'engines.funasr.downloadFailedManualHint':
+      'Manual import requires: {{files}}.',
+  };
+  const t = (key: string, values?: Record<string, string>) =>
+    (translations[key] || key).replace(
+      /\{\{(\w+)\}\}/g,
+      (_match, name: string) => values?.[name] ?? '',
+    );
+  const toast = formatFunasrDownloadFailureToast(
+    t,
+    'sensevoice-small',
+    'HTTP Error: 403',
+  );
+  eq(
+    toast.title,
+    'FunASR model download failed',
+    'funasr download error: localized title',
+  );
+  eq(
+    toast.description.includes('HTTP Error: 403'),
+    true,
+    'funasr download error: keeps raw failure detail',
+  );
+  eq(
+    toast.description.includes('model.int8.onnx, tokens.txt'),
+    true,
+    'funasr download error: names required manual import files',
+  );
+  eq(
+    isFunasrDownloadCancelled('Download cancelled'),
+    true,
+    'funasr download error: suppresses active user cancellation',
+  );
+  eq(
+    isFunasrDownloadCancelled('Download canceled'),
+    true,
+    'funasr download error: suppresses alternate canceled spelling',
+  );
+  eq(
+    isFunasrDownloadCancelled(
+      new DOMException('The operation was aborted.', 'AbortError'),
+    ),
+    true,
+    'funasr download error: suppresses abort errors',
+  );
+  eq(
+    isFunasrDownloadCancelled('HTTP Error: 403'),
+    false,
+    'funasr download error: keeps real download failures visible',
+  );
+  eq(
+    isFunasrDownloadCancelled('Error: aborted'),
+    false,
+    'funasr download error: keeps aborted network failures visible',
+  );
+}
 
 // --- subtitleSegmentation: tokensToTriples（原生逐 token 毫秒 → 字幕三元组） ---
 const T = (a: string, b: string, c: string): TokenTriple => [a, b, c];
@@ -2240,7 +3038,7 @@ eq(
     'outcome/fw: clean → reduceRepetition on',
   );
 
-  // sherpa（funasr/qwen/fireRedAsr）：只映射 VAD 灵敏度，绝不关 VAD / 设 ctx / 抗重复
+  // sherpa：只映射 VAD 灵敏度，绝不关 VAD / 设 ctx / 抗重复
   const sherpaAccurate = resolveEffectiveSettings(
     { transcriptionEngine: 'funasr', subtitleOutcome: 'accurate' },
     {},
@@ -2285,6 +3083,14 @@ eq(
     ).vadThreshold,
     0.5,
     'outcome/sherpa(fireRed): balanced → VAD standard threshold',
+  );
+  eq(
+    resolveEffectiveSettings(
+      { transcriptionEngine: 'parakeet', subtitleOutcome: 'clean' },
+      {},
+    ).vadThreshold,
+    0.65,
+    'outcome/sherpa(parakeet): clean → VAD conservative threshold',
   );
 
   // custom 档：回读用户底层值（builtin 从 formData.maxContext 取）
@@ -2458,6 +3264,7 @@ eq(
   eq(isSherpaEngineId('funasr'), true, 'isSherpa: funasr');
   eq(isSherpaEngineId('qwen'), true, 'isSherpa: qwen');
   eq(isSherpaEngineId('fireRedAsr'), true, 'isSherpa: fireRedAsr');
+  eq(isSherpaEngineId('parakeet'), true, 'isSherpa: parakeet');
   eq(isSherpaEngineId('builtin'), false, 'isSherpa: builtin no');
   eq(isSherpaEngineId('fasterWhisper'), false, 'isSherpa: fasterWhisper no');
   eq(
@@ -3466,6 +4273,242 @@ eq(
   'chunk: exceeding limit splits at silence midpoints',
 );
 
+// --- builtinAudioChunking: planEvenChunkTargets ---
+eq(
+  planEvenChunkTargets(3600),
+  [],
+  'builtin chunk: 1h below activate threshold -> no chunking',
+);
+eq(
+  planEvenChunkTargets(10800),
+  [],
+  'builtin chunk: common long content (3h movie/podcast) keeps single pass',
+);
+eq(
+  planEvenChunkTargets(BUILTIN_CHUNK_ACTIVATE_SECONDS),
+  [],
+  'builtin chunk: exactly at activate threshold -> no chunking',
+);
+eq(
+  planEvenChunkTargets(43200),
+  [3600, 7200, 10800, 14400, 18000, 21600, 25200, 28800, 32400, 36000, 39600],
+  'builtin chunk: 12h -> 11 even cut targets (12 chunks of 1h)',
+);
+eq(
+  planEvenChunkTargets(15000),
+  [3000, 6000, 9000, 12000],
+  'builtin chunk: just above threshold -> balanced chunks (no tiny tail)',
+);
+eq(
+  planEvenChunkTargets(7000, { targetSeconds: 3600, activateSeconds: 5400 }),
+  [3500],
+  'builtin chunk: ceil-balanced targets keep chunks under target size',
+);
+eq(planEvenChunkTargets(NaN), [], 'builtin chunk: invalid duration -> []');
+
+// --- builtinAudioChunking: silenceThresholdDb ---
+eq(silenceThresholdDb([]), -55, 'builtin chunk: empty frames -> default');
+eq(
+  silenceThresholdDb(Array(100).fill(-70)),
+  -61,
+  'builtin chunk: quiet floor -> floor + 9dB',
+);
+eq(
+  silenceThresholdDb(Array(100).fill(-20)),
+  -38,
+  'builtin chunk: loud continuous speech -> capped at -38dB',
+);
+
+// --- builtinAudioChunking: pickSilenceCut ---
+{
+  // 20ms 帧、窗口起点 100s：语音 -20dB，帧 400–500 为 -70dB 静音 run（108–110s，中点 109s）
+  const frames = Array(1000).fill(-20);
+  for (let i = 400; i < 500; i += 1) frames[i] = -70;
+  eq(
+    pickSilenceCut(frames, 0.02, 100, 105),
+    109,
+    'builtin chunk: cut lands at midpoint of longest silence run',
+  );
+  // 两个静音 run：更长者胜出（帧 100–150 中点 102.5s vs 帧 700–900 中点 116s）
+  const twoRuns = Array(1000).fill(-20);
+  for (let i = 100; i < 150; i += 1) twoRuns[i] = -70;
+  for (let i = 700; i < 900; i += 1) twoRuns[i] = -70;
+  eq(
+    pickSilenceCut(twoRuns, 0.02, 100, 103),
+    116,
+    'builtin chunk: longer silence run wins over nearer short one',
+  );
+  // 全程语音（无合格静音 run）→ 退回目标位置
+  eq(
+    pickSilenceCut(Array(1000).fill(-20), 0.02, 100, 105),
+    105,
+    'builtin chunk: continuous speech window falls back to target cut',
+  );
+  // 短于 minRun 的间隙不算切点
+  const shortGap = Array(1000).fill(-20);
+  for (let i = 500; i < 510; i += 1) shortGap[i] = -70; // 0.2s < 0.3s
+  eq(
+    pickSilenceCut(shortGap, 0.02, 100, 105),
+    105,
+    'builtin chunk: sub-minimum silence gap is not a cut candidate',
+  );
+}
+
+// --- builtinAudioChunking: boundariesFromCuts ---
+eq(
+  boundariesFromCuts(100, [30, 60]),
+  [
+    { start: 0, end: 30 },
+    { start: 30, end: 60 },
+    { start: 60, end: 100 },
+  ],
+  'builtin chunk: cuts -> contiguous boundaries',
+);
+eq(
+  boundariesFromCuts(100, [60, 30, 60, NaN, -5, 200]),
+  [
+    { start: 0, end: 30 },
+    { start: 30, end: 60 },
+    { start: 60, end: 100 },
+  ],
+  'builtin chunk: boundaries dedupe/sort and drop invalid cuts',
+);
+eq(
+  boundariesFromCuts(100, [0.5, 99.5]),
+  [{ start: 0, end: 100 }],
+  'builtin chunk: cuts creating <1s fragments are skipped',
+);
+eq(boundariesFromCuts(0, [10]), [], 'builtin chunk: no duration -> []');
+
+// --- builtinAudioChunking: offset merge helpers ---
+eq(
+  offsetNativeTokens(
+    [
+      { text: ' Hello', t0: 100, t1: 500, p: 0.9 },
+      { text: ' world', t0: NaN, t1: 800 },
+    ],
+    3600000,
+  ),
+  [
+    { text: ' Hello', t0: 3600100, t1: 3600500, p: 0.9 },
+    { text: ' world', t0: NaN, t1: 3600800 },
+  ],
+  'builtin chunk: token offset in ms, invalid times preserved',
+);
+eq(
+  offsetVadSegments([{ t0: 0, t1: 1500 }], 7200000),
+  [{ t0: 7200000, t1: 7201500 }],
+  'builtin chunk: vad segment offset in ms',
+);
+eq(
+  offsetSegmentCues(
+    [
+      ['00:00:01,000', '00:00:02,500', 'hi'],
+      ['bogus', '00:00:03,000', 'kept'],
+    ],
+    3600,
+  ),
+  [
+    ['01:00:01,000', '01:00:02,500', 'hi'],
+    ['bogus', '00:00:03,000', 'kept'],
+  ],
+  'builtin chunk: segment cue offset in sec, unparseable kept as-is',
+);
+
+// --- builtinAudioChunking: chunkedProgressPercent ---
+eq(
+  chunkedProgressPercent(0, 12, 50),
+  4,
+  'builtin chunk: progress scales within first chunk',
+);
+eq(
+  chunkedProgressPercent(6, 12, 0),
+  50,
+  'builtin chunk: chunk index maps to overall baseline',
+);
+eq(
+  chunkedProgressPercent(11, 12, 100),
+  99,
+  'builtin chunk: final chunk caps at 99 until done',
+);
+eq(chunkedProgressPercent(0, 0, 50), 0, 'builtin chunk: zero chunks -> 0');
+
+// --- wavWindowEnergy: windowFrameDb（合成 WAV：窗口读取 + 静音切点端到端） ---
+{
+  const writeTestWav = (
+    file: string,
+    samples: Int16Array,
+    sampleRate: number,
+  ) => {
+    const header = Buffer.alloc(44);
+    header.write('RIFF', 0, 'ascii');
+    header.writeUInt32LE(36 + samples.length * 2, 4);
+    header.write('WAVE', 8, 'ascii');
+    header.write('fmt ', 12, 'ascii');
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20); // PCM
+    header.writeUInt16LE(1, 22); // mono
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(sampleRate * 2, 28);
+    header.writeUInt16LE(2, 32);
+    header.writeUInt16LE(16, 34);
+    header.write('data', 36, 'ascii');
+    header.writeUInt32LE(samples.length * 2, 40);
+    fs.writeFileSync(
+      file,
+      Buffer.concat([
+        header,
+        Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength),
+      ]),
+    );
+  };
+
+  // 4s @16kHz 单声道：全程"语音"（幅值 6000），1.5s–2.5s 为纯静音
+  const sampleRate = 16000;
+  const samples = new Int16Array(4 * sampleRate).fill(6000);
+  samples.fill(0, 1.5 * sampleRate, 2.5 * sampleRate);
+  const wavPath = nodePath.join(os.tmpdir(), `smartsub-test-${Date.now()}.wav`);
+  writeTestWav(wavPath, samples, sampleRate);
+  const layout = {
+    sampleRate,
+    channels: 1,
+    bitsPerSample: 16,
+    dataOffset: 44,
+    dataBytes: samples.length * 2,
+  };
+
+  const window = windowFrameDb(wavPath, layout, 1, 3);
+  eq(window !== null, true, 'wav window: analyzable window returns frames');
+  eq(
+    window!.frameDb.length,
+    100,
+    'wav window: 2s window at 20ms frames -> 100 frames',
+  );
+  eq(
+    Math.abs(window!.frameDurationSec - 0.02) < 1e-9,
+    true,
+    'wav window: frame duration is 20ms',
+  );
+  // 端到端：窗口能量 → 静音切点落在静音区正中（2.0s），而不是目标位置（1.8s）
+  eq(
+    pickSilenceCut(window!.frameDb, window!.frameDurationSec, 1, 1.8),
+    2,
+    'wav window: end-to-end cut lands at silence midpoint, not mid-sentence',
+  );
+
+  eq(
+    windowFrameDb(wavPath, { ...layout, bitsPerSample: 32 }, 1, 3),
+    null,
+    'wav window: non-PCM16 layout rejected',
+  );
+  eq(
+    windowFrameDb(wavPath, layout, 10, 12),
+    null,
+    'wav window: window beyond data -> null',
+  );
+  fs.unlinkSync(wavPath);
+}
+
 // --- cloudAsrShared: needsSpaceBefore ---
 eq(needsSpaceBefore('Hello'), true, 'asr: latin word needs leading space');
 eq(needsSpaceBefore('2026'), true, 'asr: digit word needs leading space');
@@ -3503,6 +4546,28 @@ eq(
   realignPunctuation([{ word: 'x', start: 0, end: 1 }], '').map((w) => w.word),
   ['x'],
   'asr: realign with empty fullText is a no-op',
+);
+eq(
+  realignPunctuation(
+    [
+      { word: 'これは。', start: 0, end: 1 },
+      { word: '次', start: 1, end: 2 },
+    ],
+    'これは 。次',
+  ).map((w) => w.word),
+  ['これは。', '次'],
+  'asr: realign ignores a gap containing transcript text',
+);
+eq(
+  realignPunctuation(
+    [
+      { word: 'known', start: 0, end: 1 },
+      { word: 'missing', start: 1, end: 2 },
+    ],
+    'known trailing text.',
+  ).map((w) => w.word),
+  ['known', 'missing'],
+  'asr: realign ignores a tail containing transcript text',
 );
 
 // --- cloudAsrShared: offsetWords ---
@@ -3788,6 +4853,68 @@ eq(
   mapDeepgramWords([{ word: 'plain', start: 1, end: 2 }]),
   [{ word: 'plain', start: 1, end: 2 }],
   'deepgram: falls back to word when no punctuated_word',
+);
+eq(
+  mapDeepgramWords([
+    { word: 'これは', punctuated_word: '「これは', start: 0, end: 1 },
+    { word: '次', punctuated_word: '。」次', start: 1, end: 2 },
+    { word: 'です', punctuated_word: 'です。', start: 2, end: 3 },
+  ]),
+  [
+    { word: '「これは。」', start: 0, end: 1 },
+    { word: '次', start: 1, end: 2 },
+    { word: 'です。', start: 2, end: 3 },
+  ],
+  'deepgram: Japanese leading closing punctuation reattaches to previous word (#391)',
+);
+eq(
+  mapDeepgramWords([
+    { word: 'これは', punctuated_word: '「これは', start: 0, end: 1 },
+    { word: '次', punctuated_word: '」。次', start: 1, end: 2 },
+  ]),
+  [
+    { word: '「これは」。', start: 0, end: 1 },
+    { word: '次', start: 1, end: 2 },
+  ],
+  'deepgram: Japanese closing quote then period both reattach to previous word',
+);
+eq(
+  mapDeepgramWords([
+    { word: '前', punctuated_word: '前。', start: 0, end: 1 },
+    { word: '次', punctuated_word: '「次', start: 1, end: 2 },
+  ]),
+  [
+    { word: '前。', start: 0, end: 1 },
+    { word: '「次', start: 1, end: 2 },
+  ],
+  'deepgram: Japanese opening quote remains with the following word',
+);
+eq(
+  mapDeepgramWords([
+    { word: 'Use', punctuated_word: 'Use', start: 0, end: 1 },
+    { word: '.NET', punctuated_word: '.NET', start: 1, end: 2 },
+  ]),
+  [
+    { word: 'Use', start: 0, end: 1 },
+    { word: '.NET', start: 1, end: 2 },
+  ],
+  'deepgram: lexical ASCII leading period is not reattached',
+);
+eq(
+  wordCuesFromResult({
+    words: mapDeepgramWords([
+      { word: 'これは', punctuated_word: 'これは', start: 0, end: 1 },
+      { word: '次', punctuated_word: '。次', start: 1, end: 2 },
+      { word: 'です', punctuated_word: 'です。', start: 2, end: 3 },
+    ]),
+    // Deepgram 的真实 transcript 由 punctuated_word 以空格连接。
+    text: 'これは 。次 です。',
+  }),
+  [
+    ['00:00:00,000', '00:00:01,000', 'これは。'],
+    ['00:00:01,000', '00:00:03,000', '次です。'],
+  ],
+  'deepgram: works with real space-joined transcript (#391)',
 );
 
 // --- deepgramUtils: extractDeepgramResult (nested structure) ---
@@ -5188,6 +6315,52 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 async function runAsyncConcurrencyTests(): Promise<void> {
+  // 可取消 JSON 请求：重定向后的慢文件树请求仍必须响应同一个 AbortSignal。
+  {
+    const server = http.createServer((req, res) => {
+      if (req.url === '/redirect') {
+        res.statusCode = 302;
+        res.setHeader('Location', '/slow-tree');
+        res.end();
+      }
+      // /slow-tree 故意不结束响应；测试必须依赖 abort 退出。
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => reject(error);
+      server.once('error', onError);
+      server.listen(0, '127.0.0.1', () => {
+        server.removeListener('error', onError);
+        resolve();
+      });
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('test server did not expose a TCP port');
+      }
+      const abort = new AbortController();
+      let fetchError: unknown = null;
+      const pending = fetchJson(`http://127.0.0.1:${address.port}/redirect`, {
+        signal: abort.signal,
+        timeoutMs: 2_000,
+        cancelMessage: 'Download cancelled',
+      }).catch((error) => {
+        fetchError = error;
+        return null;
+      });
+      await sleepMs(20);
+      abort.abort();
+      await pending;
+      eq(
+        fetchError instanceof Error ? fetchError.message : String(fetchError),
+        'Download cancelled',
+        'qwen download: abort survives JSON redirect and cancels tree fetch',
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
   // 非受限引擎不排队：未释放前重复获取也立即放行
   {
     const r1 = await acquireTranscribeSlot('builtin');
@@ -5208,7 +6381,7 @@ async function runAsyncConcurrencyTests(): Promise<void> {
       bAcquired = true;
       return r;
     });
-    const pC = acquireTranscribeSlot('fireRedAsr').then((r) => {
+    const pC = acquireTranscribeSlot('parakeet').then((r) => {
       cAcquired = true;
       return r;
     });
@@ -5277,6 +6450,154 @@ async function runAsyncConcurrencyTests(): Promise<void> {
       true,
       'gate: pre-aborted signal rejects immediately',
     );
+  }
+
+  // 模型目录事务提交：提交失败恢复旧目录，成功后替换旧目录。
+  {
+    const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'model-atomic-'));
+    const dest = nodePath.join(tmp, 'model');
+    const missingStaged = nodePath.join(tmp, 'missing-stage');
+    const rollbackBackup = nodePath.join(tmp, 'rollback-backup');
+    fs.mkdirSync(dest);
+    fs.writeFileSync(nodePath.join(dest, 'marker.txt'), 'old');
+    let rollbackError: unknown = null;
+    await commitStagedDirectory({
+      stagedDir: missingStaged,
+      destDir: dest,
+      backupDir: rollbackBackup,
+    }).catch((error) => {
+      rollbackError = error;
+    });
+    eq(
+      rollbackError instanceof Error,
+      true,
+      'atomic install: missing staging fails the commit',
+    );
+    eq(
+      fs.readFileSync(nodePath.join(dest, 'marker.txt'), 'utf8'),
+      'old',
+      'atomic install: failed commit restores the existing model',
+    );
+
+    const staged = nodePath.join(tmp, 'valid-stage');
+    const successBackup = nodePath.join(tmp, 'success-backup');
+    fs.mkdirSync(staged);
+    fs.writeFileSync(nodePath.join(staged, 'marker.txt'), 'new');
+    await commitStagedDirectory({
+      stagedDir: staged,
+      destDir: dest,
+      backupDir: successBackup,
+    });
+    eq(
+      fs.readFileSync(nodePath.join(dest, 'marker.txt'), 'utf8'),
+      'new',
+      'atomic install: valid staging replaces the existing model',
+    );
+    eq(
+      fs.existsSync(successBackup),
+      false,
+      'atomic install: successful commit removes the backup',
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // 单连接下载：完整响应成功；截断、停滞和取消都必须可靠拒绝。
+  {
+    const tmp = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'single-download-'));
+    const server = http.createServer((req, res) => {
+      if (req.url === '/ok') {
+        res.writeHead(200, { 'Content-Length': '5' });
+        res.end('hello');
+        return;
+      }
+      if (req.url === '/truncated') {
+        res.writeHead(200, { 'Content-Length': '10' });
+        res.end('short');
+        return;
+      }
+      if (req.url === '/stall') {
+        res.writeHead(200, { 'Content-Length': '5' });
+        res.flushHeaders();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') {
+          reject(new Error('test server did not expose a TCP port'));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      const okPath = nodePath.join(tmp, 'ok.bin');
+      await downloadFileSingle({
+        url: `${base}/ok`,
+        destPath: okPath,
+        timeoutMs: 100,
+      });
+      eq(
+        fs.readFileSync(okPath, 'utf8'),
+        'hello',
+        'single download: complete response closes successfully',
+      );
+
+      let truncatedError: unknown = null;
+      await downloadFileSingle({
+        url: `${base}/truncated`,
+        destPath: nodePath.join(tmp, 'truncated.bin'),
+        timeoutMs: 100,
+      }).catch((error) => {
+        truncatedError = error;
+      });
+      eq(
+        truncatedError instanceof Error,
+        true,
+        'single download: truncated content-length is rejected',
+      );
+
+      let timeoutError: unknown = null;
+      await downloadFileSingle({
+        url: `${base}/stall`,
+        destPath: nodePath.join(tmp, 'timeout.bin'),
+        timeoutMs: 40,
+      }).catch((error) => {
+        timeoutError = error;
+      });
+      eq(
+        String(timeoutError).includes('timed out'),
+        true,
+        'single download: stalled response hits the inactivity timeout',
+      );
+
+      const abort = new AbortController();
+      let cancelError: unknown = null;
+      const pending = downloadFileSingle({
+        url: `${base}/stall`,
+        destPath: nodePath.join(tmp, 'cancel.bin'),
+        signal: abort.signal,
+        timeoutMs: 1000,
+      }).catch((error) => {
+        cancelError = error;
+      });
+      setTimeout(() => abort.abort(), 20);
+      await pending;
+      eq(
+        cancelError instanceof Error &&
+          cancelError.message === SINGLE_DOWNLOAD_CANCELLED,
+        true,
+        'single download: abort rejects with the shared cancellation marker',
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   }
 
   // 云端服务商闸：并发上限跨调用共享

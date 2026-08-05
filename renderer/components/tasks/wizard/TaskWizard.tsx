@@ -96,6 +96,7 @@ import type {
   UserStylePreset,
   VideoQuality,
 } from '../../../../types/subtitleMerge';
+import { stripSpeakerDiarizationConfig } from '../../../../types/speakerDiarization';
 
 type GoalKey = 'translate' | 'dub' | 'video';
 
@@ -300,7 +301,7 @@ export default function TaskWizard() {
     [appendFiles],
   );
 
-  // 启动台拖放交接：sessionStorage 一次性消费
+  // 启动台/下载页交接：sessionStorage 一次性消费
   useEffect(() => {
     try {
       const raw = sessionStorage.getItem(WIZARD_DROP_KEY);
@@ -314,6 +315,12 @@ export default function TaskWizard() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 下载页交接来源（?fromDownload=<downloadWorkItemId>）：写入任务快照供回溯
+  const sourceDownloadWorkItemId =
+    typeof router.query.fromDownload === 'string' && router.query.fromDownload
+      ? router.query.fromDownload
+      : null;
 
   // ── 目标产物 ──────────────────────────────────────────────────────────────
   const presetFull = router.query.preset === 'full';
@@ -622,6 +629,8 @@ export default function TaskWizard() {
       compose,
       gates: _gates,
       taskType: _taskType,
+      manuscriptPath: _manuscriptPath,
+      manuscriptName: _manuscriptName,
       ...subtitleFields
     } = pendingRecipeConfig;
     form.reset({ ...form.getValues(), ...subtitleFields });
@@ -666,6 +675,13 @@ export default function TaskWizard() {
         label: t('stage.transcribe'),
         icon: Mic2,
       });
+      if (formData?.manuscriptPath) {
+        list.push({
+          key: 'manuscript',
+          label: t('stage.manuscript'),
+          icon: FileText,
+        });
+      }
     }
     if (translateOn) {
       list.push({
@@ -681,7 +697,7 @@ export default function TaskWizard() {
       list.push({ key: 'compose', label: t('stage.compose'), icon: Film });
     }
     return list;
-  }, [inputKind, translateOn, dubOn, videoOn, t]);
+  }, [inputKind, formData?.manuscriptPath, translateOn, dubOn, videoOn, t]);
 
   const blockers = useMemo(() => {
     const list: Array<{ key: string; text: string; href?: string }> = [];
@@ -741,6 +757,35 @@ export default function TaskWizard() {
     ) {
       list.push({ key: 'goal', text: t('wizard.blockNoGoal') });
     }
+    // AI 字幕精修（openspec: add-ai-subtitle-refine D9 即时校验）：
+    // 开启精修但「跟随翻译服务」不可解析（翻译未开启/非 AI 类型）且未显式指定，
+    // 或显式指定的服务商已失效 → 阻断开始，避免运行时才降级。
+    if (
+      inputKind === 'media' &&
+      (formData?.aiSegmentation === true || formData?.aiCorrection === true)
+    ) {
+      const refineSetting = formData?.refineProvider || 'follow-translation';
+      if (refineSetting === 'follow-translation') {
+        const tp = providers.find(
+          (p: any) => p.id === formData?.translateProvider,
+        );
+        if (!translateOn || !tp?.isAi) {
+          list.push({
+            key: 'refine',
+            text: t('wizard.blockRefineFollow'),
+          });
+        }
+      } else {
+        const rp = providers.find((p: any) => p.id === refineSetting);
+        if (!rp?.isAi || !isProviderConfigured(rp)) {
+          list.push({
+            key: 'refine',
+            text: t('wizard.blockRefineProviderInvalid'),
+            href: `/${locale}/translation`,
+          });
+        }
+      }
+    }
     return list;
   }, [
     files.length,
@@ -752,6 +797,9 @@ export default function TaskWizard() {
     translateOn,
     providers,
     formData?.translateProvider,
+    formData?.aiSegmentation,
+    formData?.aiCorrection,
+    formData?.refineProvider,
     dubOn,
     activeEngine,
     activeVoice,
@@ -775,11 +823,16 @@ export default function TaskWizard() {
     try {
       const dubEngine =
         dubOn && activeEngine ? parseEngineKey(activeEngine.key) : null;
-      const config: Partial<IFormData> = { ...formData };
+      const config: Partial<IFormData> = stripSpeakerDiarizationConfig({
+        ...formData,
+      });
       delete config.taskType;
       delete config.dub;
       delete config.compose;
       delete config.gates;
+      // 参考文稿属于单次任务输入，不写入可复用配方，避免下次误用旧文件路径。
+      delete config.manuscriptPath;
+      delete config.manuscriptName;
       if (dubOn && dubEngine) {
         config.dub = {
           engine: dubEngine,
@@ -833,10 +886,14 @@ export default function TaskWizard() {
               providedSubtitlePath: p.subtitle.filePath,
             }))
           : files;
-      const payload = {
+      const payload = stripSpeakerDiarizationConfig({
         ...formData,
         taskType,
+        ...(inputKind !== 'media'
+          ? { manuscriptPath: '', manuscriptName: '' }
+          : {}),
         ...(appliedRecipeName ? { recipeName: appliedRecipeName } : {}),
+        ...(sourceDownloadWorkItemId ? { sourceDownloadWorkItemId } : {}),
         translateProvider: translateOn ? formData?.translateProvider : '-1',
         ...(dubOn && dubEngine
           ? {
@@ -862,7 +919,7 @@ export default function TaskWizard() {
               },
             }
           : {}),
-      };
+      });
       await window?.ipc?.invoke('saveTaskProject', {
         id: projectId,
         taskType,

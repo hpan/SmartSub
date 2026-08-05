@@ -139,8 +139,8 @@ function wordBoundaryOffsets(text: string): Set<number> | null {
   return bounds;
 }
 
-/** 把 `HH:MM:SS.mmm` / `MM:SS` / 纯秒（逗号或点皆可）解析为秒；非法返回 null。 */
-function parseTime(time?: string): number | null {
+/** 把 `HH:MM:SS.mmm` / `MM:SS` / 纯秒（逗号或点皆可）解析为秒；非法返回 null。导出供纯逻辑模块复用。 */
+export function parseTime(time?: string): number | null {
   if (!time) return null;
   const normalized = time.trim().replace(',', '.');
   const parts = normalized.split(':').map((part) => Number(part));
@@ -163,8 +163,8 @@ export function formatTime(seconds: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
 }
 
-/** East-Asian-Width 近似：CJK / 全角记 2，其余记 1。用于单行字幕宽度上限。 */
-function visualWidth(text: string): number {
+/** East-Asian-Width 近似：CJK / 全角记 2，其余记 1。用于单行字幕宽度上限。导出供 subtitleRefine 护栏复用。 */
+export function visualWidth(text: string): number {
   let width = 0;
   for (const ch of text) {
     const code = ch.codePointAt(0) ?? 0;
@@ -372,7 +372,7 @@ function splitTextByWidth(text: string, maxWidth: number): string[] {
  * 缺席时回退 Intl.Segmenter 词边界，绝境才按字符直切——不拆词），
  * 时间按各段文本宽度**比例插值**（拟造时间，非真实词时间）。
  *
- * 仅供**没有词级时间戳**的路径使用（FunASR / Qwen / FireRed / 旧加速包段级回退 /
+ * 仅供**没有词级时间戳**的路径使用（本地 sherpa ASR / 旧加速包段级回退 /
  * 云端段级、整段降级）。有词级时间戳的路径一律走 `composeWordCues`——
  * groupTokenCues（含硬切回溯）在真实词时间上断句，质量严格优于比例插值。
  */

@@ -20,6 +20,16 @@ import {
   readProofreadDataFile,
   updateProofreadDataFromSubtitles,
 } from './proofreadData';
+import {
+  prefixTextWithSpeakerNames,
+  type SpeakerInfo,
+} from '../../types/proofreadData';
+import {
+  MANUSCRIPT_EXTENSIONS,
+  ManuscriptFileError,
+  readManuscriptFile,
+  toManuscriptSelectionPayload,
+} from './manuscriptMatching';
 
 // 定义支持的文件扩展名常量
 export const MEDIA_EXTENSIONS = [
@@ -158,18 +168,33 @@ function buildSubtitleFileContent(
   filePath: string,
   subtitles: any[],
   contentType = 'source',
+  speakerOptions?: {
+    speakers?: SpeakerInfo[];
+    embedSpeakerNames?: boolean;
+  },
 ): string {
   const format = detectSubtitleFormat(filePath);
+  const withSpeakerPrefix = (subtitle: any, text: string): string => {
+    if (!speakerOptions?.embedSpeakerNames) return text;
+    return prefixTextWithSpeakerNames(
+      text,
+      subtitle,
+      speakerOptions.speakers || [],
+    );
+  };
   const buildText = (subtitle): string => {
+    let text: string;
     if (contentType === 'source') {
-      return subtitle.sourceContent ?? '';
+      text = subtitle.sourceContent ?? '';
+    } else {
+      const template =
+        CONTENT_TEMPLATES[contentType] || CONTENT_TEMPLATES.onlyTranslate;
+      text = renderTemplate(template, {
+        sourceContent: subtitle.sourceContent ?? '',
+        targetContent: subtitle.targetContent ?? '',
+      }).replace(/\n+$/, '');
     }
-    const template =
-      CONTENT_TEMPLATES[contentType] || CONTENT_TEMPLATES.onlyTranslate;
-    return renderTemplate(template, {
-      sourceContent: subtitle.sourceContent ?? '',
-      targetContent: subtitle.targetContent ?? '',
-    }).replace(/\n+$/, '');
+    return withSpeakerPrefix(subtitle, text);
   };
 
   return (
@@ -212,8 +237,17 @@ async function writeSubtitleFile(
   filePath: string,
   subtitles: any[],
   contentType = 'source',
+  speakerOptions?: {
+    speakers?: SpeakerInfo[];
+    embedSpeakerNames?: boolean;
+  },
 ): Promise<void> {
-  const content = buildSubtitleFileContent(filePath, subtitles, contentType);
+  const content = buildSubtitleFileContent(
+    filePath,
+    subtitles,
+    contentType,
+    speakerOptions,
+  );
   await backupSubtitleFile(filePath);
   await fs.promises.writeFile(filePath, content, 'utf-8');
   logMessage(`保存字幕文件成功: ${filePath}`, 'info');
@@ -277,6 +311,34 @@ export function setupIpcHandlers(mainWindow: BrowserWindow) {
       }
     }
     event.sender.send('file-selected', allValidPaths.map(wrapFileObject));
+  });
+
+  /**
+   * 参考文稿使用独立 invoke 通道，不复用 file-selected 广播，避免选中的 txt/md
+   * 被任务页误当成媒体或字幕追加到文件列表。主进程在返回路径前完成扩展名、大小、
+   * 编码和非空校验；运行阶段会再次读取校验，以覆盖文件被移动/修改的情况。
+   */
+  ipcMain.handle('manuscript:select', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [
+        {
+          name: 'Reference Manuscript',
+          extensions: MANUSCRIPT_EXTENSIONS.map((ext) => ext.slice(1)),
+        },
+      ],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    try {
+      const manuscript = await readManuscriptFile(result.filePaths[0]);
+      return toManuscriptSelectionPayload(manuscript);
+    } catch (error) {
+      const code =
+        error instanceof ManuscriptFileError ? error.code : 'unreadable';
+      const message = error instanceof Error ? error.message : String(error);
+      logMessage(`select manuscript failed (${code}): ${message}`, 'warning');
+      return { errorCode: code, error: message };
+    }
   });
 
   ipcMain.on('openUrl', (event, url) => {
@@ -352,7 +414,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow) {
         return [];
       }
       const proofreadData = await readProofreadDataFile(filePath);
-      return proofreadDataToSubtitleRows(proofreadData);
+      return {
+        subtitles: proofreadDataToSubtitleRows(proofreadData),
+        speakers: proofreadData.speakers,
+      };
     } catch (error) {
       logMessage(`读取校对中间态错误: ${error.message}`, 'error');
       return [];
@@ -413,10 +478,14 @@ export function setupIpcHandlers(mainWindow: BrowserWindow) {
       {
         proofreadDataFile,
         subtitles,
+        speakers = [],
+        embedSpeakerNames = false,
         outputs = [],
       }: {
         proofreadDataFile: string;
         subtitles: any[];
+        speakers?: SpeakerInfo[];
+        embedSpeakerNames?: boolean;
         outputs: { filePath?: string; contentType?: string }[];
       },
     ) => {
@@ -427,7 +496,11 @@ export function setupIpcHandlers(mainWindow: BrowserWindow) {
           );
         }
 
-        await updateProofreadDataFromSubtitles(proofreadDataFile, subtitles);
+        const updated = await updateProofreadDataFromSubtitles(
+          proofreadDataFile,
+          subtitles,
+          speakers,
+        );
 
         const rendered = new Set<string>();
         for (const output of outputs) {
@@ -440,6 +513,10 @@ export function setupIpcHandlers(mainWindow: BrowserWindow) {
             filePath,
             subtitles,
             output.contentType || 'source',
+            {
+              speakers: updated.speakers,
+              embedSpeakerNames,
+            },
           );
         }
 

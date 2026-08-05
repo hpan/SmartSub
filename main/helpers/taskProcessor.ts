@@ -6,6 +6,8 @@ import { logMessage, store } from './storeManager';
 import path from 'path';
 import { isAppleSilicon } from './utils';
 import { IFiles } from '../../types';
+import { isPinnedTaskConfigSnapshot } from '../../types/taskSnapshot';
+import { enforceSpeakerDiarizationTaskBoundary } from '../../types/speakerDiarization';
 import { ExtendedProvider, CustomParameterConfig } from '../../types/provider';
 import { configurationManager } from '../service/configurationManager';
 import { applyTaskEventToProjects } from './taskManager';
@@ -246,19 +248,27 @@ async function startTaskRun(
   const pid = projectId || DEFAULT_PROJECT_ID;
   dispatchEvent = event;
 
-  // 任务级配置快照：带附加阶段（配音/合成）的任务以创建时快照为准执行，
+  // 任务级配置快照：带附加阶段、参考文稿或角色分离的任务以创建时快照为准，
   // 重试/续跑不受此后全局设置变更影响；首次提交时把有效配置写入快照。
-  let formData = incomingFormData;
+  let formData = enforceSpeakerDiarizationTaskBoundary({
+    ...(incomingFormData || {}),
+  });
   const workItem = getWorkItemById(pid);
   if (workItem) {
     const snapshot = workItem.configSnapshot as any;
-    if (
-      (snapshot?.dub || snapshot?.compose) &&
-      !incomingFormData?.dub &&
-      !incomingFormData?.compose
-    ) {
-      // 旧任务页重试向导任务：回退到快照配置
-      formData = { ...snapshot };
+    if (isPinnedTaskConfigSnapshot(snapshot)) {
+      // 固定快照任务的重试/闸门续跑始终复用创建时配置，禁止当前全局表单覆盖。
+      formData = enforceSpeakerDiarizationTaskBoundary({ ...snapshot });
+      if (
+        snapshot?.speakerDiarization !== undefined &&
+        formData.speakerDiarization === undefined
+      ) {
+        // 迁移早期预览版曾允许流水线携带角色分离；首次续跑时清掉无效残留。
+        saveWorkItem({
+          ...workItem,
+          configSnapshot: { ...formData },
+        });
+      }
       logMessage(`handleTask: using config snapshot for ${pid}`, 'info');
     } else {
       saveWorkItem({
@@ -527,7 +537,7 @@ async function processNextTasks(event) {
   }
 
   // 任务级并发统一遵循用户配置的 maxConcurrentTasks。
-  // 受限引擎（faster-whisper / funasr / qwen / fireRedAsr 共享单 sidecar/worker）
+  // 受限引擎（faster-whisper / sherpa ASR 共享单 sidecar/worker）
   // 不再在此钳制整个队列：其「转写阶段」由 transcribeGate 按执行体组排队，
   // 排队期间同批其它文件的音频提取 / 翻译 / 云端转写照常并行（阶段流水线）。
   const availableSlots = maxConcurrentTasks - activeTasksCount;

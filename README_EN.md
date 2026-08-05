@@ -26,29 +26,39 @@ Make every frame speak beautifully
 
 ## What is SmartSub?
 
-SmartSub is an open-source subtitle and dubbing tool that packs the whole pipeline — **speech-to-text → subtitle translation → proofreading → AI dubbing → burn-in** — into one desktop app. Transcription runs on local models (whisper.cpp, sherpa-onnx and more), so your files never leave your machine. It handles batch jobs, accelerates on NVIDIA / AMD / Intel / Apple Silicon GPUs, and runs on Windows, macOS, and Linux.
+SmartSub is an open-source subtitle and dubbing tool that packs the whole pipeline — **speech-to-text → subtitle translation → proofreading → AI dubbing → burn-in** — into one desktop app, with a built-in online video downloader: paste a YouTube / Bilibili link and the source video is fetched for you. Transcription runs on local models (whisper.cpp, sherpa-onnx and more), so your files never leave your machine. It handles batch jobs, accelerates on NVIDIA / AMD / Intel / Apple Silicon GPUs, and runs on Windows, macOS, and Linux.
 
 If you've been juggling separate tools for transcription, translation, text-to-speech, and burning subtitles with ffmpeg, SmartSub is a free, offline-friendly way to do all of it in one place. **The entire pipeline can run at zero cost**: local Whisper transcription, built-in free translation sources, local TTS dubbing with voice cloning, and local ffmpeg burn-in — no API keys required, no usage caps on local processing. When you want more, plug in any of 20 translation services, 8 cloud transcription providers, and 5 cloud TTS services.
 
 ## What can it do for you?
 
-| Your goal                                     | How SmartSub handles it                                                              |
-| --------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Watch foreign videos or lectures without subs | Drop in the video, transcribe locally, translate — get bilingual subtitles instantly |
-| Localize content for other markets            | Translate subtitles, then dub them into a new audio track with TTS                   |
-| Narrate videos in your own voice              | Record a short sample, clone your voice, and have it read the whole video            |
-| Archive podcasts, courses, meeting recordings | Batch-transcribe into SRT files for editing, search, or archiving                    |
-| Ship videos with polished subtitles           | Proofread line by line, then hardcode or soft-mux with WYSIWYG styling               |
+| Your goal                                     | How SmartSub handles it                                                                    |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Watch foreign videos or lectures without subs | Drop in the video, transcribe locally, translate — get bilingual subtitles instantly       |
+| Subtitle an online video (YouTube / Bilibili) | Paste the link — the video downloads in-app, official subs auto-pair, no third-party tools |
+| Localize content for other markets            | Translate subtitles, then dub them into a new audio track with TTS                         |
+| Narrate videos in your own voice              | Record a short sample, clone your voice, and have it read the whole video                  |
+| Archive podcasts, courses, meeting recordings | Batch-transcribe into SRT files for editing, search, or archiving                          |
+| Ship videos with polished subtitles           | Proofread line by line, then hardcode or soft-mux with WYSIWYG styling                     |
 
 ## Features
 
-Media → **transcribe** → **translate** → **proofread** → **dub** → **export**. Use each step on its own, or chain them into a batch pipeline.
+Online video **download** / local media → **transcribe** → **translate** → **proofread** → **dub** → **export**. Use each step on its own, or chain them into a batch pipeline.
+
+### Online video download
+
+- Paste links to download videos from YouTube, Bilibili, and more — one link per line for batch downloads, with automatic link extraction from mixed text
+- Dual engines: yt-dlp (YouTube and 1800+ sites) and lux (Bilibili, Douyin, Xiaohongshu, and other Chinese platforms), auto-matched per platform and installed / updated in one click inside the app
+- Optionally grab the platform's official subtitles (auto-generated ones included), auto-paired in the task wizard — with official subs there's nothing to transcribe
+- Import site cookies (one-click browser extraction, cookies.txt, or paste) to unlock login-gated resolutions and member-only content; cookies stay on your machine
+- Configurable output folder, quality (best or a specific tier), and concurrency; finished downloads hand off to transcription / translation in one click
 
 ### Subtitle generation (transcription)
 
 - Batch subtitle generation for a wide range of video / audio formats, with configurable concurrency
-- 7 engine families, switchable per task: built-in `whisper.cpp`, `faster-whisper`, `FunASR`, `Qwen3-ASR`, `FireRedASR`, your local `Whisper CLI`, plus GPU-free Cloud ASR (8 providers)
-- Local engines are fully offline — nothing gets uploaded; FunASR / FireRedASR shine on Chinese content
+- 8 engine families, switchable per task: built-in `whisper.cpp`, `faster-whisper`, `FunASR`, `Qwen3-ASR`, `FireRedASR`, `NVIDIA Parakeet`, your local `Whisper CLI`, plus GPU-free Cloud ASR (8 providers)
+- Local engines are fully offline — nothing gets uploaded; FunASR / FireRedASR shine on Chinese, while Parakeet targets English and European languages
+- Optional AI subtitle refine: LLM semantic segmentation + batch correction — lines are regrouped by meaning while timing stays word-accurate (no dangling connectives, numbers never split by pauses); correction fixes homophones, removes fillers and normalizes punctuation. Defaults to your AI translation provider (free with local Ollama) and falls back to rule-based segmentation on failure
 - Simplified/Traditional Chinese conversion, custom subtitle file naming (for player auto-loading), optional punctuation removal for Chinese subtitles
 
 ### Subtitle translation
@@ -97,12 +107,13 @@ Media → **transcribe** → **translate** → **proofread** → **dub** → **e
 
 If you're cost-conscious, this route costs nothing and requires no sign-ups:
 
-| Step          | Free option                                                                       | Notes                                     |
-| ------------- | --------------------------------------------------------------------------------- | ----------------------------------------- |
-| Transcription | whisper.cpp / faster-whisper / FunASR / Qwen3-ASR / FireRedASR local models       | Download a model once, works offline      |
-| Translation   | Built-in free translation (Bing / Google endpoints with fallback), Ollama, DeepLX | Free translation works with zero setup    |
-| TTS dubbing   | Local Kokoro / VITS / ZipVoice voice cloning; Edge TTS free tier                  | Local synthesis is offline, no usage caps |
-| Burn-in       | Bundled ffmpeg                                                                    | Fully local                               |
+| Step           | Free option                                                                            | Notes                                     |
+| -------------- | -------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Video download | yt-dlp / lux open-source engines                                                       | Installed in-app with one click, free     |
+| Transcription  | whisper.cpp / faster-whisper / FunASR / Qwen3-ASR / FireRedASR / Parakeet local models | Download a model once, works offline      |
+| Translation    | Built-in free translation (Bing / Google endpoints with fallback), Ollama, DeepLX      | Free translation works with zero setup    |
+| TTS dubbing    | Local Kokoro / VITS / ZipVoice voice cloning; Edge TTS free tier                       | Local synthesis is offline, no usage caps |
+| Burn-in        | Bundled ffmpeg                                                                         | Fully local                               |
 
 Paid cloud services (OpenAI, ElevenLabs, Volcengine, Tencent Cloud, and others) are optional upgrades — use them only if you want them.
 
@@ -130,7 +141,7 @@ brew upgrade --cask smartsub # upgrade
 ### Up and running in three steps
 
 1. After installing, follow the onboarding guide to download a speech model (no GPU or no model? Configure Cloud ASR instead)
-2. Pick a task from the launchpad, drop in media or subtitle files, and set source language, target language, and other options
+2. Pick a task from the launchpad, drop in media or subtitle files (or paste a link to download an online video), and set source language, target language, and other options
 3. Start processing — then proofread, dub, or burn in the results
 
 ## Going deeper
@@ -147,12 +158,13 @@ The engine is a per-task choice. Manage runtimes and models from the "Engines & 
 | **whisper.cpp (built-in)** | Default engine; ggml quantized models and GPU acceleration           | Bundled, works out of the box                    |
 | **faster-whisper**         | CTranslate2-based, faster; models fetched on demand from HuggingFace | Self-contained Python runtime (in-app download)  |
 | **FunASR**                 | SenseVoice (zh/en/ja/ko/yue) and Paraformer-zh; great for Chinese    | Bundled sherpa-onnx native library               |
-| **Qwen3-ASR**              | Qwen speech recognition (qwen3-asr-0.6b)                             | Bundled sherpa-onnx native library               |
+| **Qwen3-ASR**              | Qwen speech recognition (qwen3-asr-0.6b / 1.7b)                      | Bundled sherpa-onnx native library               |
 | **FireRedASR**             | FireRedASR-AED large (zh-en); great for Chinese                      | Bundled sherpa-onnx native library               |
+| **NVIDIA Parakeet**        | Parakeet TDT 0.6B v3; 25 European languages with punctuation/casing  | Bundled sherpa-onnx native library               |
 | **Local Whisper CLI**      | Calls a whisper-compatible command you installed yourself            | Uses your system command                         |
 | **Cloud ASR (online)**     | 8 providers, no GPU needed, multi-provider and multi-instance        | Online service (audio uploaded to your endpoint) |
 
-FunASR / Qwen3-ASR / FireRedASR all run on the bundled sherpa-onnx native library with no extra setup; faster-whisper downloads a self-contained runtime inside the app.
+FunASR / Qwen3-ASR / FireRedASR / Parakeet all run on the bundled sherpa-onnx native library with no extra setup; faster-whisper downloads a self-contained runtime inside the app.
 
 </details>
 
@@ -269,7 +281,7 @@ On Apple Silicon, also download the model's `encoder.mlmodelc` file and unzip it
 
 To import: on the "Engines & Models" page click "Import Model" and pick the downloaded file — or copy it straight into the model directory.
 
-Models for FunASR / Qwen3-ASR / FireRedASR download on demand inside the "Engines & Models" page (multiple sources: ModelScope, GitHub, and more).
+Models for FunASR / Qwen3-ASR / FireRedASR / Parakeet download on demand inside the "Engines & Models" page (multiple sources: ModelScope, GitHub, and more).
 
 </details>
 
@@ -333,18 +345,24 @@ If the native dependencies fail to download automatically (e.g. restricted netwo
 
 </details>
 
+## Sponsors
+
+This project is supported by:
+
+<a href="https://m.do.co/c/604498b8a664" target="_blank" rel="noopener noreferrer"><img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" width="201" alt="DigitalOcean" /></a>
+
 ## Community and support
 
-If this project helps you, a star is appreciated — or buy the author a coffee (please mention your GitHub account). For usage questions, the WeChat group is open to everyone.
+If this project helps you, a star is appreciated — or buy the author a coffee (please mention your GitHub account). For usage questions, the QQ group is open to everyone (group ID: 655348339).
 
-| Alipay                                            | WeChat donation                                   | WeChat group                                  |
-| ------------------------------------------------- | ------------------------------------------------- | --------------------------------------------- |
-| ![Alipay donation](./resources/donate_alipay.jpg) | ![WeChat donation](./resources/donate_wechat.jpg) | ![WeChat group](./resources/WechatIMG428.png) |
+| Alipay                                            | WeChat donation                                   | QQ group                              |
+| ------------------------------------------------- | ------------------------------------------------- | ------------------------------------- |
+| ![Alipay donation](./resources/donate_alipay.jpg) | ![WeChat donation](./resources/donate_wechat.jpg) | ![QQ group](./resources/qq-group.jpg) |
 
 ## Acknowledgements
 
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — the foundation of local transcription
-- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — runtime for FunASR / Qwen3-ASR / FireRedASR and local TTS
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — runtime for FunASR / Qwen3-ASR / FireRedASR / Parakeet and local TTS
 - [FFmpeg](https://ffmpeg.org/) — media processing and subtitle burn-in
 - [Bob](https://bobtranslate.com/) — documentation on translation service signup
 

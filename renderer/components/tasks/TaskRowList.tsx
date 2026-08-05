@@ -35,6 +35,7 @@ import {
   getDockedGate,
   getFilePercent,
   getFileError,
+  getFileWarning,
   hasFileError,
   isProofreadReady,
   getProofreadUnavailableReason,
@@ -44,6 +45,7 @@ import {
   type RailItem,
   type StageDef,
 } from './stageUtils';
+import { SPEAKER_DIARIZATION_METADATA_SAVE_FAILED } from '../../../types/speakerDiarization';
 
 interface TaskRowListProps {
   files: any[];
@@ -67,7 +69,7 @@ export function RailChips({
 }: {
   file: any;
   rail: RailItem[];
-  t: (key: string) => string;
+  t: (key: string, options?: Record<string, unknown>) => string;
   className?: string;
 }) {
   return (
@@ -105,6 +107,31 @@ export function RailChips({
         }
         const stage = item.stage;
         const status = getStageStatus(file, stage.key);
+        const manuscriptSummary =
+          stage.key === 'manuscriptMatch' ? file?.manuscriptMatchSummary : null;
+        const manuscriptWarning =
+          stage.key === 'manuscriptMatch' && status === 'done'
+            ? file?.manuscriptMatchError
+            : '';
+        const manuscriptWarningReason = manuscriptWarning
+          ? t(`manuscript.error.${manuscriptWarning}`, {
+              defaultValue:
+                file?.manuscriptMatchErrorDetail || manuscriptWarning,
+            })
+          : '';
+        const manuscriptTitle = manuscriptWarning
+          ? t('manuscript.stageWarning', {
+              reason: manuscriptWarningReason,
+            })
+          : manuscriptSummary
+            ? t('manuscript.stageSummary', {
+                replaced: manuscriptSummary.replacedCues,
+                total: manuscriptSummary.totalCues,
+                confidence: Math.round(
+                  Number(manuscriptSummary.averageConfidence || 0) * 100,
+                ),
+              })
+            : undefined;
         return (
           <React.Fragment key={stage.key}>
             {index > 0 && <ChevronRight className="h-3 w-3 text-faint" />}
@@ -113,16 +140,28 @@ export function RailChips({
                 'inline-flex items-center gap-1 text-xs whitespace-nowrap',
                 status === 'pending' && 'text-faint',
                 status === 'loading' && 'text-primary font-medium',
-                status === 'done' && 'text-success',
+                status === 'done' &&
+                  (manuscriptWarning ? 'text-warning' : 'text-success'),
                 status === 'error' && 'text-destructive font-medium',
               )}
+              title={manuscriptTitle}
             >
               {status === 'loading' && (
                 <Loader2 className="h-3 w-3 animate-spin" />
               )}
-              {status === 'done' && <CheckCircle2 className="h-3 w-3" />}
+              {status === 'done' &&
+                (manuscriptWarning ? (
+                  <CircleAlert className="h-3 w-3" />
+                ) : (
+                  <CheckCircle2 className="h-3 w-3" />
+                ))}
               {status === 'error' && <CircleAlert className="h-3 w-3" />}
               {t(stage.labelKey)}
+              {status === 'done' && manuscriptSummary && (
+                <span className="text-[10px]">
+                  {manuscriptSummary.replacedCues}/{manuscriptSummary.totalCues}
+                </span>
+              )}
               {status === 'loading' &&
                 stage.key === 'extractSubtitle' &&
                 file.whisperBackend && (
@@ -258,6 +297,11 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
         const rawError = failed ? getFileError(file, stages) : '';
         const errorMsg =
           rawError === 'TASK_INTERRUPTED' ? t('interrupted') : rawError;
+        const rawWarning = getFileWarning(file, stages);
+        const warningMsg =
+          rawWarning === SPEAKER_DIARIZATION_METADATA_SAVE_FAILED
+            ? t('row.speakerDiarizationMetadataSaveFailed')
+            : rawWarning;
         const started = stages.some(
           (s) => getStageStatus(file, s.key) !== 'pending',
         );
@@ -276,7 +320,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
           typeDef,
         );
         const proofreadDisabled =
-          !isProofreadReady(file, typeDef) ||
+          !isProofreadReady(file, typeDef, formData) ||
           proofreadUnavailableReason !== null;
         const proofreadTooltip =
           proofreadUnavailableReason === 'txt'
@@ -289,6 +333,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
             className={cn(
               'group rounded-lg border px-3 py-2.5 transition-colors hover:bg-muted/40',
               failed && 'border-destructive/30',
+              !failed && warningMsg && 'border-warning/30',
             )}
           >
             <div className="flex items-center gap-3">
@@ -462,6 +507,20 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-md">
                     <p className="break-all">{errorMsg}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+            {!failed && warningMsg && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <p className="mt-1.5 pl-5 text-xs text-warning truncate cursor-default">
+                      {warningMsg}
+                    </p>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-md">
+                    <p className="break-all">{warningMsg}</p>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>

@@ -8,6 +8,7 @@ import {
 } from '../pythonRuntime/paths';
 import {
   getFasterWhisperModelsPath,
+  inspectCt2ModelSnapshot,
   resolveCt2ModelSnapshotDir,
 } from '../modelCatalog';
 import { formatSrtContent } from '../fileUtils';
@@ -21,7 +22,10 @@ import {
   composeWordCues,
   getSubtitleCueOptions,
   wordsToTriples,
+  type TimedWord,
 } from '../subtitleSegmentation';
+import { writeWordTimelineSidecar } from '../wordTimelineSidecar';
+import { refineWordsFromTimedWords } from '../subtitleRefine';
 import {
   getTaskContext,
   isTaskCancelledError,
@@ -35,6 +39,7 @@ import {
 } from './transcribeShared';
 import { resolveEffectiveSettings } from './outcomePresets';
 import type { TranscribeContext, TranscriptionEngineAdapter } from './types';
+import { buildFasterWhisperAdvancedParams } from '../../../types/transcriptionParams';
 
 /**
  * 判定是否为 CUDA 运行库（cuBLAS/cuDNN/cudart）缺失或无法加载类错误。
@@ -168,8 +173,14 @@ async function transcribeFasterWhisper(
   }
 
   const modelId = toFasterWhisperModel(model);
-  const modelSnapshotDir = resolveCt2ModelSnapshotDir(modelId);
+  const modelInspection = inspectCt2ModelSnapshot(modelId);
+  const modelSnapshotDir = modelInspection.snapshotDir;
   if (!modelSnapshotDir) {
+    if (modelInspection.incompleteSnapshotDir) {
+      throw new Error(
+        `faster-whisper model "${modelId}" is incomplete (${modelInspection.issues.join(', ')}). Download it again from Resource Hub > Models to repair the missing files; deleting it first is not required.`,
+      );
+    }
     throw new Error(
       `faster-whisper model "${modelId}" not found in ${getFasterWhisperModelsPath()}. Download it from Resource Hub > Models.`,
     );
@@ -209,6 +220,10 @@ async function transcribeFasterWhisper(
     vad_speech_pad_ms: getNumericSetting(settings.vadSpeechPad, 200),
     // 抗幻觉/抗重复参数（仅开关开启时注入；关闭则不下发，sidecar 回落默认）。
     ...getFasterWhisperAntiRepetitionParams(settings),
+    // 任务级高级解码参数：只下发新版 sidecar 契约支持且通过类型/范围校验的显式值；
+    // 未设置或非法值保持缺键，完整保留 faster-whisper 默认行为。旧 runtime 可能
+    // 忽略新增字段，UI 会明确提示用户先更新。
+    ...buildFasterWhisperAdvancedParams(formData),
   };
 
   const signal = ctx.signal ?? getTaskContext()?.signal;
@@ -331,6 +346,21 @@ async function transcribeFasterWhisper(
   subtitles = trimSubtitleTrailingSilence(subtitles, tempAudioFile);
   const formattedSrt = formatSrtContent(subtitles);
   await fs.promises.writeFile(srtFile, formattedSrt);
+
+  // 词级时间轴 sidecar（openspec: add-ai-subtitle-refine D6）：word_timestamps 恒开，
+  // segments[].words 缺失（旧 sidecar/异常返回）时不落盘——精修阶段自动走近似模式。
+  const timelineWords = segments.flatMap(
+    (segment: { words?: Array<TimedWord & { probability?: number }> }) =>
+      segment?.words ?? [],
+  );
+  file.wordTimelineFile =
+    timelineWords.length > 0
+      ? writeWordTimelineSidecar(
+          tempAudioFile,
+          'fasterWhisper',
+          refineWordsFromTimedWords(timelineWords),
+        )
+      : undefined;
 
   event.sender.send('taskProgressChange', file, 'extractSubtitle', 100);
   event.sender.send('taskFileChange', { ...file, extractSubtitle: 'done' });

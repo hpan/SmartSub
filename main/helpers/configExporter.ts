@@ -3,6 +3,9 @@ import fs from 'fs';
 import { dialog } from 'electron';
 import { store } from './store';
 import { logMessage } from './logger';
+import { sanitizeStoragePathPatch } from './storagePaths';
+import { supportedLanguage } from './utils';
+import { sanitizeCustomLanguages } from '../../types/language';
 
 const MAGIC = 'VSM_CONFIG';
 const FORMAT_VERSION = 1;
@@ -74,6 +77,8 @@ function collectExportData(): Record<string, any> {
   const {
     modelsPath: _modelsPath,
     customTempDir: _customTempDir,
+    storageRoot: _storageRoot,
+    selectedCudaDevice: _selectedCudaDevice,
     ...portableSettings
   } = settings;
 
@@ -183,11 +188,29 @@ export async function importConfig(
     const currentSettings = store.get('settings');
     store.set('translationProviders', data.translationProviders);
     store.set('userConfig', data.userConfig);
+    // 中文路径兜底（design D6-2）：导入的旧配置可能带含 CJK 的引擎路径键
+    const { sanitized, rejectedKeys } = sanitizeStoragePathPatch(data.settings);
+    if (rejectedKeys.length > 0) {
+      logMessage(
+        `Config import: dropped storage path keys containing CJK characters: ${rejectedKeys.join(', ')}`,
+        'warning',
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(sanitized, 'customLanguages')) {
+      sanitized.customLanguages = sanitizeCustomLanguages(
+        sanitized.customLanguages,
+        supportedLanguage.map((language) => language.value),
+      );
+    }
     store.set('settings', {
       ...currentSettings,
-      ...data.settings,
+      ...sanitized,
+      // 机器本地路径不随配置迁移：保留本机现值
       modelsPath: currentSettings.modelsPath,
       customTempDir: currentSettings.customTempDir,
+      storageRoot: currentSettings.storageRoot,
+      // GPU UUID is machine-local and must never migrate across computers.
+      selectedCudaDevice: currentSettings.selectedCudaDevice,
     });
     if (data.customParameters) {
       store.set('customParameters', data.customParameters);

@@ -13,6 +13,7 @@ import {
   FormField,
   FormItem,
   FormLabel,
+  FormMessage,
 } from '@/components/ui/form';
 import {
   Select,
@@ -42,6 +43,14 @@ import {
   type SubtitleOutcome,
 } from 'lib/subtitleOutcome';
 import { useTranslation } from 'next-i18next';
+import {
+  FASTER_WHISPER_ADVANCED_PARAM_SPECS,
+  isValidFasterWhisperAdvancedParamValue,
+  supportsFasterWhisperAdvancedParams,
+  type FasterWhisperAdvancedParamSpec,
+  type FasterWhisperAdvancedSettingKey,
+} from '../../../types/transcriptionParams';
+import { isSpeakerDiarizationStandardTaskContext } from '../../../types/speakerDiarization';
 
 interface AdvancedSheetProps {
   open: boolean;
@@ -59,81 +68,209 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
-type SubtitleLengthMode = 'smart' | 'unlimited' | 'custom';
+function formatAdvancedNumberDraft(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? String(value)
+    : '';
+}
 
 /**
- * 「字幕断句方式」三态选择（共用 maxSubtitleChars 字段，数字编码不暴露给用户）：
- * 智能断句 = 0；不限制长度 = -1；自定义字数上限 = 正数（8-120）。
- * 自定义数字走本地草稿：输入框清空时不回写 0，避免模式瞬间塌回「智能断句」。
+ * 独立草稿避免数值输入的负号/小数中间态被受控 value 立即改写。
+ * 编辑中即时展示错误但不把非法值写进任务配置；失焦时非法值清空，确保任务永远只拿到
+ * 合法数字或 undefined（undefined = 沿用引擎默认）。
  */
-const SubtitleLengthField: React.FC<{
-  field: { value?: unknown; onChange: (value: number) => void };
-}> = ({ field }) => {
+const FasterWhisperAdvancedNumberField: React.FC<{
+  form: any;
+  spec: FasterWhisperAdvancedParamSpec;
+  field: any;
+}> = ({ form, spec, field }) => {
   const { t } = useTranslation('tasks');
-  const { t: tHome } = useTranslation('home');
-  const raw = Number(field.value ?? 0);
-  const mode: SubtitleLengthMode =
-    raw < 0 ? 'unlimited' : raw > 0 ? 'custom' : 'smart';
-  const [draft, setDraft] = useState<string>(raw > 0 ? String(raw) : '40');
+  const [draft, setDraft] = useState(() =>
+    formatAdvancedNumberDraft(field.value),
+  );
+  const [editing, setEditing] = useState(false);
+
   useEffect(() => {
-    if (raw > 0) setDraft(String(raw));
-  }, [raw]);
+    if (!editing) {
+      setDraft(formatAdvancedNumberDraft(field.value));
+    }
+  }, [editing, field.value]);
+
+  const validationMessage = t(
+    spec.integer
+      ? 'fasterWhisperAdvanced.integerRangeError'
+      : 'fasterWhisperAdvanced.rangeError',
+    {
+      min: spec.min,
+      max: spec.max,
+    },
+  );
+
+  const updateFormValue = (raw: string) => {
+    if (raw.trim() === '') {
+      form.setValue(spec.settingKey, undefined, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      form.clearErrors(spec.settingKey);
+      return;
+    }
+
+    const nextValue = Number(raw);
+    if (isValidFasterWhisperAdvancedParamValue(nextValue, spec)) {
+      form.setValue(spec.settingKey, nextValue, {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      form.clearErrors(spec.settingKey);
+      return;
+    }
+
+    // 草稿可暂时非法，但任务配置始终回落 undefined，防止快捷键开跑或持久化脏值。
+    form.setValue(spec.settingKey, undefined, {
+      shouldDirty: true,
+      shouldValidate: false,
+    });
+    form.setError(spec.settingKey, {
+      type: 'validate',
+      message: validationMessage,
+    });
+  };
 
   return (
     <FormItem>
-      <FormLabel>{t('subtitleLength.label')}</FormLabel>
-      <Select
-        value={mode}
-        onValueChange={(value) => {
-          if (value === 'unlimited') {
-            field.onChange(-1);
-          } else if (value === 'custom') {
-            const parsed = Number(draft);
-            field.onChange(parsed > 0 ? Math.round(parsed) : 40);
-          } else {
-            field.onChange(0);
-          }
-        }}
-      >
-        <FormControl>
-          <SelectTrigger>
-            <SelectValue placeholder={tHome('pleaseSelect')} />
-          </SelectTrigger>
-        </FormControl>
-        <SelectContent>
-          <SelectItem value="smart">{t('subtitleLength.modeSmart')}</SelectItem>
-          <SelectItem value="unlimited">
-            {t('subtitleLength.modeUnlimited')}
-          </SelectItem>
-          <SelectItem value="custom">
-            {t('subtitleLength.modeCustom')}
-          </SelectItem>
-        </SelectContent>
-      </Select>
-      {mode === 'custom' && (
+      <FormLabel>
+        {t(`fasterWhisperAdvanced.fields.${spec.runtimeKey}.label`)}
+      </FormLabel>
+      <FormControl>
         <Input
-          type="number"
-          min={8}
-          max={120}
+          type="text"
+          inputMode={spec.integer ? 'numeric' : 'decimal'}
           value={draft}
-          onChange={(e) => {
-            const value = e.target.value;
-            setDraft(value);
-            const parsed = Number(value);
-            if (Number.isFinite(parsed) && parsed > 0) {
-              field.onChange(Math.round(parsed));
+          placeholder={t(
+            `fasterWhisperAdvanced.fields.${spec.runtimeKey}.placeholder`,
+          )}
+          onFocus={() => setEditing(true)}
+          onChange={(event) => {
+            const raw = event.target.value;
+            setDraft(raw);
+            updateFormValue(raw);
+          }}
+          onBlur={() => {
+            setEditing(false);
+            const parsed = draft.trim() === '' ? undefined : Number(draft);
+            if (
+              parsed === undefined ||
+              !isValidFasterWhisperAdvancedParamValue(parsed, spec)
+            ) {
+              setDraft('');
+              form.setValue(spec.settingKey, undefined, {
+                shouldDirty: true,
+                shouldValidate: true,
+              });
+            } else {
+              setDraft(String(parsed));
+              form.setValue(spec.settingKey, parsed, {
+                shouldDirty: true,
+                shouldValidate: true,
+              });
             }
+            field.onBlur();
           }}
         />
-      )}
+      </FormControl>
       <FormDescription className="text-xs">
-        {mode === 'smart' && t('subtitleLength.hintSmart')}
-        {mode === 'unlimited' && t('subtitleLength.hintUnlimited')}
-        {mode === 'custom' && t('subtitleLength.hintCustom')}
+        {t(`fasterWhisperAdvanced.fields.${spec.runtimeKey}.hint`)}
       </FormDescription>
+      <FormMessage />
     </FormItem>
   );
 };
+
+const FasterWhisperAdvancedFields: React.FC<{ form: any }> = ({ form }) => {
+  const { t } = useTranslation('tasks');
+
+  return (
+    <Collapsible className="rounded-lg border">
+      <CollapsibleTrigger
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+      >
+        <span className="space-y-0.5">
+          <span className="flex items-center gap-2 text-sm font-medium">
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            {t('fasterWhisperAdvanced.title')}
+            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+              faster-whisper
+            </Badge>
+          </span>
+          <span className="block text-xs font-normal text-muted-foreground">
+            {t('fasterWhisperAdvanced.summary')}
+          </span>
+        </span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="space-y-4 border-t px-3 py-3">
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {t('fasterWhisperAdvanced.description')}
+        </p>
+        <p className="rounded-md bg-muted/60 px-2.5 py-2 text-xs leading-relaxed text-muted-foreground">
+          {t('fasterWhisperAdvanced.runtimeNote')}
+        </p>
+        {FASTER_WHISPER_ADVANCED_PARAM_SPECS.map((spec) => (
+          <FormField
+            key={spec.settingKey}
+            control={form.control}
+            name={spec.settingKey}
+            rules={{
+              validate: (value) =>
+                value === undefined ||
+                value === '' ||
+                isValidFasterWhisperAdvancedParamValue(value, spec) ||
+                t(
+                  spec.integer
+                    ? 'fasterWhisperAdvanced.integerRangeError'
+                    : 'fasterWhisperAdvanced.rangeError',
+                  {
+                    min: spec.min,
+                    max: spec.max,
+                  },
+                ),
+            }}
+            render={({ field }) => (
+              <FasterWhisperAdvancedNumberField
+                form={form}
+                spec={spec}
+                field={field}
+              />
+            )}
+          />
+        ))}
+        <button
+          type="button"
+          className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          onClick={() => {
+            FASTER_WHISPER_ADVANCED_PARAM_SPECS.forEach((spec) => {
+              form.setValue(
+                spec.settingKey as FasterWhisperAdvancedSettingKey,
+                undefined,
+                { shouldDirty: true, shouldValidate: true },
+              );
+            });
+          }}
+        >
+          {t('fasterWhisperAdvanced.reset')}
+        </button>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+};
+
+type SubtitleLengthMode = 'smart' | 'unlimited' | 'custom';
+
+// 「字幕断句方式」已整体迁入任务工具栏的「断句与精修」控件（AiRefineControl，
+// openspec: add-ai-subtitle-refine 8.7）：断句是"呈现层"决策，与此处「字幕效果」
+// 档位（转写引擎的识别取舍）物理分离，消除两处配置的心智负担。
 
 const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
   open,
@@ -146,6 +283,8 @@ const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
   const { t: tHome } = useTranslation('home');
 
   const isMediaTask = typeDef.accepts === 'media';
+  const showSpeakerDiarization =
+    isMediaTask && isSpeakerDiarizationStandardTaskContext(formData);
   const showFormatHere = typeDef.hasTranslate; // generateOnly 已在配置条展示
 
   const engine = formData?.transcriptionEngine as string | undefined;
@@ -156,6 +295,9 @@ const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
   // 仍读一次全局 settings：① 作为老任务（formData 无该字段）的迁移回退显示值；
   // ② 供 inferDisplayOutcome 在任务无显式档位时推断显示默认。
   const [settings, setSettings] = useState<Record<string, unknown>>({});
+  const [diarizationReady, setDiarizationReady] = useState<boolean | null>(
+    null,
+  );
   useEffect(() => {
     if (!open) return;
     let active = true;
@@ -163,6 +305,25 @@ const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
       const s = await window?.ipc?.invoke('getSettings');
       if (active) setSettings(s ?? {});
     })();
+    return () => {
+      active = false;
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    window?.ipc
+      ?.invoke('getSpeakerDiarizationModelStatus')
+      .then((result) => {
+        if (active) {
+          setDiarizationReady(
+            result?.installed === true && result?.runtimeInstalled === true,
+          );
+        }
+      })
+      .catch(() => {
+        if (active) setDiarizationReady(false);
+      });
     return () => {
       active = false;
     };
@@ -416,14 +577,6 @@ const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
 
                       <FormField
                         control={form.control}
-                        name="maxSubtitleChars"
-                        render={({ field }) => (
-                          <SubtitleLengthField field={field} />
-                        )}
-                      />
-
-                      <FormField
-                        control={form.control}
                         name="prompt"
                         render={({ field }) => (
                           <FormItem>
@@ -442,6 +595,10 @@ const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
                           </FormItem>
                         )}
                       />
+
+                      {supportsFasterWhisperAdvancedParams(engine) && (
+                        <FasterWhisperAdvancedFields form={form} />
+                      )}
                       <FormField
                         control={form.control}
                         name="saveAudio"
@@ -462,6 +619,128 @@ const AdvancedSheet: React.FC<AdvancedSheetProps> = ({
                           </FormItem>
                         )}
                       />
+
+                      {showSpeakerDiarization && (
+                        <FormField
+                          control={form.control}
+                          name="speakerDiarization"
+                          render={({ field }) => (
+                            <FormItem className="space-y-2 rounded-lg border p-2">
+                              <div className="flex flex-row items-center justify-between gap-3">
+                                <div className="space-y-0.5">
+                                  <FormLabel className="flex items-center gap-2">
+                                    {t('speakerDiarization.label')}
+                                    {diarizationReady !== null && (
+                                      <Badge
+                                        variant="outline"
+                                        className={
+                                          diarizationReady
+                                            ? 'border-success/40 text-success'
+                                            : 'border-amber-500/40 text-amber-600'
+                                        }
+                                      >
+                                        {t(
+                                          diarizationReady
+                                            ? 'speakerDiarization.modelReady'
+                                            : 'speakerDiarization.modelMissing',
+                                        )}
+                                      </Badge>
+                                    )}
+                                  </FormLabel>
+                                  <FormDescription className="text-xs">
+                                    {t('speakerDiarization.hint')}
+                                  </FormDescription>
+                                </div>
+                                <FormControl>
+                                  <Switch
+                                    checked={field.value === true}
+                                    onCheckedChange={field.onChange}
+                                  />
+                                </FormControl>
+                              </div>
+                              {field.value === true && (
+                                <FormField
+                                  control={form.control}
+                                  name="speakerDiarizationCount"
+                                  render={({ field: countField }) => (
+                                    <div className="flex items-center justify-between gap-3 border-t pt-2">
+                                      <div>
+                                        <FormLabel className="text-xs">
+                                          {t('speakerDiarization.speakerCount')}
+                                        </FormLabel>
+                                        <p className="text-[11px] text-muted-foreground">
+                                          {t(
+                                            'speakerDiarization.speakerCountHint',
+                                          )}
+                                        </p>
+                                      </div>
+                                      <Select
+                                        value={String(countField.value || 0)}
+                                        onValueChange={(value) =>
+                                          countField.onChange(Number(value))
+                                        }
+                                      >
+                                        <SelectTrigger className="w-28">
+                                          <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          <SelectItem value="0">
+                                            {t('speakerDiarization.autoDetect')}
+                                          </SelectItem>
+                                          {[2, 3, 4, 5, 6, 7, 8].map(
+                                            (count) => (
+                                              <SelectItem
+                                                key={count}
+                                                value={String(count)}
+                                              >
+                                                {count}
+                                              </SelectItem>
+                                            ),
+                                          )}
+                                        </SelectContent>
+                                      </Select>
+                                    </div>
+                                  )}
+                                />
+                              )}
+                              {field.value === true && (
+                                <FormField
+                                  control={form.control}
+                                  name="speakerDiarizationEmbedInSubtitle"
+                                  render={({ field: embedField }) => (
+                                    <div className="flex items-center justify-between gap-3 border-t pt-2">
+                                      <div className="space-y-0.5">
+                                        <FormLabel className="text-xs">
+                                          {t(
+                                            'speakerDiarization.embedInSubtitle',
+                                          )}
+                                        </FormLabel>
+                                        <p className="text-[11px] text-muted-foreground">
+                                          {t(
+                                            'speakerDiarization.embedInSubtitleHint',
+                                          )}
+                                        </p>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={embedField.value === true}
+                                          onCheckedChange={embedField.onChange}
+                                        />
+                                      </FormControl>
+                                    </div>
+                                  )}
+                                />
+                              )}
+                              {field.value === true &&
+                                diarizationReady === false && (
+                                  <p className="text-xs text-amber-600">
+                                    {t('speakerDiarization.modelMissingHint')}
+                                  </p>
+                                )}
+                            </FormItem>
+                          )}
+                        />
+                      )}
                     </>
                   )}
 

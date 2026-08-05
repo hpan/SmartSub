@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { ISystemInfo } from '../../../types/types';
+import { validateStoragePath } from '../../../types/pathValidation';
 import DeleteModel from '@/components/DeleteModel';
 import DownModel, { type ModelDownloadFormat } from '@/components/DownModel';
 import DownModelButton from '@/components/DownModelButton';
@@ -60,6 +61,7 @@ import type { TranscriptionEngine } from '../../../types/engine';
 import FunasrModelSection from '@/components/resources/FunasrModelSection';
 import QwenModelSection from '@/components/resources/QwenModelSection';
 import FireRedModelSection from '@/components/resources/FireRedModelSection';
+import ParakeetModelSection from '@/components/resources/ParakeetModelSection';
 
 type FasterWhisperModelEntry = {
   id: string;
@@ -886,7 +888,36 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
   const isFunasr = engine === 'funasr';
   const isQwen = engine === 'qwen';
   const isFireRed = engine === 'fireRedAsr';
+  const isParakeet = engine === 'parakeet';
   const isLocalCli = engine === 'localCli';
+
+  // 当前引擎的路径覆盖键与来源（默认 / 统一目录 / 单独设置）
+  const modelPathKey = isFasterWhisper
+    ? 'fasterWhisperModelsPath'
+    : isFunasr
+      ? 'funasrModelsPath'
+      : isQwen
+        ? 'qwenModelsPath'
+        : isFireRed
+          ? 'fireRedModelsPath'
+          : isParakeet
+            ? 'parakeetModelsPath'
+            : 'modelsPath';
+  const modelPathSource =
+    systemInfo?.modelPathSources?.[
+      isFasterWhisper
+        ? 'ct2'
+        : isFunasr
+          ? 'funasr'
+          : isQwen
+            ? 'qwen'
+            : isFireRed
+              ? 'firered'
+              : isParakeet
+                ? 'parakeet'
+                : 'ggml'
+    ];
+  const storageRootSet = !!systemInfo?.storageRoot;
 
   const handleImportModel = async () => {
     try {
@@ -916,18 +947,15 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
     const result = await window?.ipc?.invoke('selectDirectory');
     if (result.canceled) return;
 
+    // 中文路径硬校验（design D6）：本地引擎无法读取含 CJK 字符的路径
+    if (!validateStoragePath(result.directoryPath).ok) {
+      toast.error(t('pathContainsCjkError'));
+      return;
+    }
+
     try {
-      const pathKey = isFasterWhisper
-        ? 'fasterWhisperModelsPath'
-        : isFunasr
-          ? 'funasrModelsPath'
-          : isQwen
-            ? 'qwenModelsPath'
-            : isFireRed
-              ? 'fireRedModelsPath'
-              : 'modelsPath';
       await window?.ipc?.invoke('setSettings', {
-        [pathKey]: result.directoryPath,
+        [modelPathKey]: result.directoryPath,
       });
       toast.success(t('modelPathChanged'), {
         duration: 4000,
@@ -936,6 +964,25 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
       onUpdate();
     } catch (error) {
       console.error('Failed to change models path:', error);
+      toast.error(
+        t('changePathFailed', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  };
+
+  // 清空单独覆盖，恢复跟随统一存储目录（CT2 场景由主进程按有效路径变化重启 Python 运行时）
+  const handleFollowStorageRoot = async () => {
+    try {
+      await window?.ipc?.invoke('setSettings', { [modelPathKey]: '' });
+      toast.success(t('modelPathFollowedRoot'), {
+        duration: 4000,
+        description: t('modelPathChangedHint'),
+      });
+      onUpdate();
+    } catch (error) {
+      console.error('Failed to reset models path:', error);
       toast.error(
         t('changePathFailed', {
           error: error instanceof Error ? error.message : String(error),
@@ -955,7 +1002,9 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
               ? 'qwen'
               : isFireRed
                 ? 'firered'
-                : 'ggml',
+                : isParakeet
+                  ? 'parakeet'
+                  : 'ggml',
       });
       if (!result?.success) {
         toast.error(
@@ -1055,7 +1104,7 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
 
   // HuggingFace 系下载源（官方/国内镜像）：ggml/ct2/FunASR 共用同一持久化偏好。
   // 统一为「点击下载时再选源」——通过 Context 下发给真正发起下载的叶子组件，
-  // 由其就地弹出气泡选源，零常驻占位。qwen/firered 自管各自源（弹窗内选）。
+  // 由其就地弹出气泡选源，零常驻占位。其余 Sherpa 模型族自管各自源。
   const downloadSourceConfig: DownloadSourceConfig | null =
     isBuiltin || isFasterWhisper || isFunasr
       ? {
@@ -1100,7 +1149,7 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
             />
           )}
 
-          {!isLocalCli && !isFunasr && !isQwen && !isFireRed && (
+          {!isLocalCli && !isFunasr && !isQwen && !isFireRed && !isParakeet && (
             <div className="flex flex-wrap items-center gap-3">
               <div className="relative flex-1 min-w-[180px]">
                 <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground pointer-events-none" />
@@ -1146,7 +1195,8 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
             isFasterWhisper ||
             isFunasr ||
             isQwen ||
-            isFireRed) && (
+            isFireRed ||
+            isParakeet) && (
             <div className="text-xs text-muted-foreground flex flex-wrap items-center gap-x-1 gap-y-1">
               <HardDrive className="h-3 w-3 shrink-0" />
               <span className="shrink-0">
@@ -1164,8 +1214,22 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
                       ? systemInfo?.qwenModelsPath
                       : isFireRed
                         ? systemInfo?.fireRedModelsPath
-                        : systemInfo?.modelsPath}
+                        : isParakeet
+                          ? systemInfo?.parakeetModelsPath
+                          : systemInfo?.modelsPath}
               </span>
+              {modelPathSource && (
+                <Badge
+                  variant="outline"
+                  className="h-4 shrink-0 px-1 text-[10px] font-normal text-muted-foreground"
+                >
+                  {modelPathSource === 'override'
+                    ? t('pathSourceOverride')
+                    : modelPathSource === 'storageRoot'
+                      ? t('pathSourceStorageRoot')
+                      : t('pathSourceDefault')}
+                </Badge>
+              )}
               <button
                 type="button"
                 onClick={handleOpenModelsFolder}
@@ -1182,6 +1246,18 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
               >
                 <span>{t('changePath')}</span>
               </button>
+              {modelPathSource === 'override' && storageRootSet && (
+                <>
+                  <span className="text-faint">·</span>
+                  <button
+                    type="button"
+                    onClick={handleFollowStorageRoot}
+                    className="inline-flex items-center gap-0.5 text-primary hover:text-primary/80 transition-colors"
+                  >
+                    <span>{t('followStorageRoot')}</span>
+                  </button>
+                </>
+              )}
             </div>
           )}
 
@@ -1195,6 +1271,8 @@ const ModelLibrarySection: React.FC<ModelLibrarySectionProps> = ({
             <QwenModelSection onUpdate={onUpdate} />
           ) : isFireRed ? (
             <FireRedModelSection onUpdate={onUpdate} />
+          ) : isParakeet ? (
+            <ParakeetModelSection onUpdate={onUpdate} />
           ) : installedOnly && !hasAnyInstalled ? (
             <p className="text-sm text-muted-foreground py-8 text-center">
               {t('noInstalledModels')}

@@ -13,11 +13,15 @@ import {
 import { AlertCircle, CheckCircle2, Download, Languages } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import Models from '@/components/Models';
+import AiRefineControl from '@/components/tasks/AiRefineControl';
+import ManuscriptControl from '@/components/tasks/ManuscriptControl';
 import { supportedLanguage } from 'lib/utils';
 import { isProviderConfigured } from 'lib/providerUtils';
 import { hasAnyModelAnyEngine } from 'lib/engineModels';
 import type { TaskTypeDef } from 'lib/taskTypes';
 import { useTranslation } from 'next-i18next';
+import { useCustomLanguages } from 'hooks/useCustomLanguages';
+import { mergeLanguageOptions } from '../../../types/language';
 
 interface Provider {
   id: string;
@@ -73,6 +77,11 @@ const InlineConfigBar: React.FC<InlineConfigBarProps> = ({
   const { t: tCommon } = useTranslation('common');
   const router = useRouter();
   const { locale } = router.query;
+  const customLanguages = useCustomLanguages();
+  const languageOptions = React.useMemo(
+    () => mergeLanguageOptions(supportedLanguage, customLanguages),
+    [customLanguages],
+  );
 
   const setValue = (name: string, value: unknown) => {
     form.setValue(name, value);
@@ -90,9 +99,11 @@ const InlineConfigBar: React.FC<InlineConfigBarProps> = ({
       {includeAuto && (
         <SelectItem value="auto">{tHome('autoRecognition')}</SelectItem>
       )}
-      {supportedLanguage.map((item) => (
+      {languageOptions.map((item) => (
         <SelectItem key={item.value} value={item.value}>
-          {tCommon(`language.${item.value}`)}
+          {item.isCustom
+            ? `${item.name} (${item.value})`
+            : tCommon(`language.${item.value}`)}
         </SelectItem>
       ))}
     </SelectContent>
@@ -152,6 +163,9 @@ const InlineConfigBar: React.FC<InlineConfigBarProps> = ({
               fireRedVadInstalled={systemInfo?.fireRedVadInstalled}
               fireRedModelsInstalled={systemInfo?.fireRedModelsInstalled}
               fireRedEngineInstalled={systemInfo?.fireRedEngineInstalled}
+              parakeetVadInstalled={systemInfo?.parakeetVadInstalled}
+              parakeetModelsInstalled={systemInfo?.parakeetModelsInstalled}
+              parakeetEngineInstalled={systemInfo?.parakeetEngineInstalled}
               includeLocalCli={includeLocalCli}
             />
           ) : (
@@ -168,6 +182,19 @@ const InlineConfigBar: React.FC<InlineConfigBarProps> = ({
             </Button>
           )}
         </ConfigItem>
+      )}
+
+      {/* AI 精修（外化到工具栏，openspec: add-ai-subtitle-refine）：仅转写类任务展示 */}
+      {typeDef.needsModel && (
+        <>
+          <AiRefineControl
+            form={form}
+            formData={formData}
+            providers={providers}
+            typeDef={typeDef}
+          />
+          <ManuscriptControl form={form} formData={formData} />
+        </>
       )}
 
       <ConfigItem

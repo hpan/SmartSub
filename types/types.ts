@@ -39,6 +39,44 @@ export interface ISystemInfo {
   fireRedModelsInstalled?: string[];
   /** fireRed 模型根目录（固定路径，仅展示用，不可更改） */
   fireRedModelsPath?: string;
+  /** Parakeet 引擎包（sherpa-onnx，与其它本地 sherpa ASR 共用）是否已安装 */
+  parakeetEngineInstalled?: boolean;
+  /** Parakeet 共用 silero VAD 是否已安装 */
+  parakeetVadInstalled?: boolean;
+  /** 已安装的 Parakeet 模型 id */
+  parakeetModelsInstalled?: string[];
+  /** Parakeet 模型根目录 */
+  parakeetModelsPath?: string;
+  /** 可选角色分离模型（pyannote + 3D-Speaker）是否完整安装。 */
+  speakerDiarizationModelInstalled?: boolean;
+  /** 角色分离模型根目录。 */
+  speakerDiarizationModelsPath?: string;
+  /** userData 默认存储基座（「默认路径含中文」警示判定用） */
+  userDataPath?: string;
+  /** 统一存储根目录原始设置值（'' = 未设置） */
+  storageRoot?: string;
+  /** 各引擎模型目录来源：默认 / 统一目录 / 单独设置（引擎页 Badge 用） */
+  modelPathSources?: {
+    ggml: StoragePathSource;
+    ct2: StoragePathSource;
+    funasr: StoragePathSource;
+    qwen: StoragePathSource;
+    firered: StoragePathSource;
+    parakeet: StoragePathSource;
+  };
+}
+
+/** 与 main/helpers/storagePaths.ts 的 StorageSource 对齐（types 层无法反向依赖 main）。 */
+export type StoragePathSource = 'override' | 'storageRoot' | 'default';
+
+/** 单个文件的文稿匹配结果摘要（详细替换内容不落任务存储，避免泄露整篇文稿）。 */
+export interface ManuscriptMatchSummary {
+  manuscriptName: string;
+  totalCues: number;
+  replacedCues: number;
+  matchedGroups: number;
+  /** 已替换 cue 的平均相似度，0–1。 */
+  averageConfidence: number;
 }
 
 export interface IFiles {
@@ -50,6 +88,10 @@ export interface IFiles {
   extractAudio?: boolean;
   extractSubtitle?: boolean;
   translateSubtitle?: boolean;
+  /** 角色分离独立阶段状态；undefined 表示尚未进入该阶段。 */
+  speakerDiarization?: '' | 'loading' | 'done' | 'error';
+  speakerDiarizationProgress?: number;
+  speakerDiarizationError?: string;
   /** 配音附加阶段状态（运行时同其余阶段字段为 ''|loading|done|error 字符串） */
   dubbing?: boolean;
   /** 合成附加阶段状态（同上字符串状态机约定） */
@@ -62,9 +104,18 @@ export interface IFiles {
   tempTranslatedSrtFile?: string;
   /** 校对用无损中间态 sidecar，保存源文/译文/时间轴，避免直接读写有损交付物。 */
   proofreadDataFile?: string;
+  /** 词级时间轴 sidecar（`<tempAudio>.words.json`）：AI 语义断句精确对齐用；无词级引擎缺省。 */
+  wordTimelineFile?: string;
+  /** ASR 后参考文稿匹配阶段；缺省不存在即功能关闭。 */
+  manuscriptMatch?: '' | 'loading' | 'done';
+  /** 稳定的非致命回退码，renderer 据此本地化；不会令任务失败。 */
+  manuscriptMatchError?: string;
+  /** 仅供日志/tooltip 兜底的诊断细节，不参与本地化键。 */
+  manuscriptMatchErrorDetail?: string;
+  manuscriptMatchSummary?: ManuscriptMatchSummary;
   /** 本次转写实际使用的后端标签（如 "CUDA 12.4.0" / "Vulkan" / "CPU"） */
   whisperBackend?: string;
-  /** 该文件走了内封软字幕直提（跳过抽音频 + ASR）：用于任务列表标识 */
+  /** 该文件走了内封软字幕直提（跳过 ASR；角色分离开启时仍会抽音频）：用于任务列表标识 */
   embeddedSubtitle?: boolean;
   /**
    * 人工检查点状态（'' 未到达 | 'review' 待校对 | 'passed' 已通过）。
@@ -184,6 +235,35 @@ export interface IFormData {
    * 正数 = 自定义上限（超出时在标点或词边界处拆分）。
    */
   maxSubtitleChars?: number;
+  /**
+   * faster-whisper 解码高级参数（均为任务级、可选）。
+   * 缺省时不下发，让引擎保留自身默认与 temperature 回退序列。
+   */
+  fasterWhisperBeamSize?: number;
+  fasterWhisperBestOf?: number;
+  fasterWhisperTemperature?: number;
+  fasterWhisperCompressionRatioThreshold?: number;
+  fasterWhisperLogProbThreshold?: number;
+  fasterWhisperNoSpeechThreshold?: number;
   /** 中文标点去除（任务级开关）：开启后把中文标点替换为空格。作用于源字幕(中文源)与译文(中文目标)。缺省关闭。 */
   removeChinesePunctuation?: boolean;
+  /** AI 语义断句（精修遍 A，openspec: add-ai-subtitle-refine）。缺省关闭；旧快照无此键即关闭。 */
+  aiSegmentation?: boolean;
+  /** AI 字幕校正（精修遍 B）。缺省关闭。 */
+  aiCorrection?: boolean;
+  /** 精修服务商：缺省/'follow-translation' = 跟随翻译服务（AI 类型时解析为同一服务商），或显式 AI 服务商 id。 */
+  refineProvider?: string;
+  /** 角色分离：在转写/翻译后用本地 sherpa 模型分析角色并对齐字幕。 */
+  speakerDiarization?: boolean;
+  /** 已知角色数量（2–8）；0/undefined = 自动聚类。 */
+  speakerDiarizationCount?: number;
+  /** 是否把 `[Speaker N]` 角色标签写入字幕交付物；缺省 false，仅存 sidecar metadata。 */
+  speakerDiarizationEmbedInSubtitle?: boolean;
+  /**
+   * ASR 参考文稿（TXT / Markdown）。路径存在即开启；只替换高置信匹配文本，
+   * 时间轴始终来自 ASR。缺省/空字符串关闭，保持旧任务与配方行为。
+   */
+  manuscriptPath?: string;
+  /** 创建快照时的显示名；运行时仍以 manuscriptPath 为唯一数据源。 */
+  manuscriptName?: string;
 }

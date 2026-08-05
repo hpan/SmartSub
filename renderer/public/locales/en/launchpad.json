@@ -17,6 +17,7 @@
   "tools": {
     "title": "Tools",
     "panelTitle": "Toolbox",
+    "downloadHint": "Batch-download online videos from links",
     "proofreadHint": "Review line by line, AI polish",
     "mergeHint": "Burn subtitles into the picture",
     "dubbingHint": "Turn subtitle lines into speech"
@@ -71,13 +72,16 @@
     "generateDesc": "Transcribe speech only, no translation",
     "translate": "Translate existing subtitles",
     "translateDesc": "Translate SRT and other subtitle files into another language",
+    "download": "Video download",
     "proofread": "Proofread subtitles",
     "proofreadDesc": "Review line by line, with video preview and AI polish",
     "merge": "Burn to Video",
     "mergeDesc": "Burn subtitles into the picture so they always show",
     "dubbing": "Dubbing",
-    "dubbingDesc": "Synthesize speech line by line and align it to the timeline"
+    "dubbingDesc": "Synthesize speech line by line and align it to the timeline",
+    "download": "Video download"
   },
+  "fromDownload": "From download",
   "needsModelBadge": "Needs a model",
   "banner": {
     "noModel": "No speech model yet — it turns speech into text. Download one to get started",
