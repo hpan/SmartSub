@@ -40,7 +40,10 @@ import {
 import { readProofreadDataFile } from '../proofreadData';
 import { pickDubTextSource, cuesFromSidecarTargets } from './dubTextSource';
 import type { IFiles, IFormData, PipelineDubConfig } from '../../../types';
-import type { DubbingConfig } from '../../../types/dubbing';
+import {
+  withDubbingGlobalSpeakerFallback,
+  type DubbingConfig,
+} from '../../../types/dubbing';
 
 /** 配音阶段全局互斥（跨任务/跨文件串行；行级并发由引擎配置决定） */
 const dubStageMutex = new GroupMutex();
@@ -172,6 +175,7 @@ async function ensureDubSession(
   return createDubbingSession(
     subtitlePath,
     isMediaInput ? file.filePath : undefined,
+    file.proofreadDataFile,
   );
 }
 
@@ -188,6 +192,24 @@ function toDubbingConfig(dub: PipelineDubConfig): DubbingConfig {
     overlapMode: dub.overlapMode ?? 'shift',
     exportShiftedSubtitle: false,
   };
+}
+
+/**
+ * The automatic pipeline has no role picker. Its configured global voice is an
+ * explicit fallback for previously unmapped roles; real merge conflicts remain
+ * unresolved so the normal batch guard still stops and asks for a decision.
+ */
+function applyHeadlessSpeakerVoiceFallback(session: DubbingSession): void {
+  const conflictedSpeakerIds = new Set(
+    Object.entries(session.speakerVoiceConflicts)
+      .filter(([, voices]) => voices.length > 1)
+      .map(([id]) => Number(id)),
+  );
+  session.speakerVoiceMap = withDubbingGlobalSpeakerFallback(
+    session.speakers,
+    session.speakerVoiceMap,
+    conflictedSpeakerIds,
+  );
 }
 
 /**
@@ -218,6 +240,7 @@ export async function rebuildDubTrackForFile(
   try {
     throwIfTaskCancelled();
     const track = await buildDubTrack(session, {
+      globalVoiceId: dub.voice,
       overflow: dub.overflow ?? 'truncate',
       overlapMode: dub.overlapMode ?? 'shift',
       signal,
@@ -296,6 +319,7 @@ export async function runDubStage(
     signal?.addEventListener('abort', onAbort, { once: true });
 
     const config = toDubbingConfig(dub);
+    applyHeadlessSpeakerVoiceFallback(session);
     const result = await runDubbingBatch(session, config, (e) => {
       event.sender.send('taskProgressChange', file, STAGE_KEY, e.percent);
     });
@@ -311,6 +335,7 @@ export async function runDubStage(
 
     // 构建完整配音轨 + 顺延字幕（仅时移发生时产出；展示文本跟随交付字幕）
     const track = await buildDubTrack(session, {
+      globalVoiceId: config.voice,
       overflow: config.overflow,
       overlapMode: config.overlapMode,
       signal,
