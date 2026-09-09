@@ -64,7 +64,9 @@ import {
   getEngineModelGroups,
   isEngineModelSelected,
   pickDefaultEngineModel,
+  hasUnavailableParakeetModel,
 } from 'lib/engineModels';
+import { canStartParakeetTask } from 'lib/parakeetTask';
 import InlineConfigBar from '@/components/tasks/InlineConfigBar';
 import useSystemInfo from 'hooks/useStystemInfo';
 import useLocalFormConfig from 'hooks/useLocalFormConfig';
@@ -97,12 +99,42 @@ import type {
   VideoQuality,
 } from '../../../../types/subtitleMerge';
 import { stripSpeakerDiarizationConfig } from '../../../../types/speakerDiarization';
+import DubbingLanguageSelect from '../../dubbing/DubbingLanguageSelect';
+import {
+  localTtsLanguageError,
+  resolveTtsLanguage,
+} from '../../../../types/ttsLanguage';
 
 type GoalKey = 'translate' | 'dub' | 'video';
+
+const VIDEO_MEDIA_EXTENSIONS = new Set([
+  'mp4',
+  'avi',
+  'mov',
+  'mkv',
+  'flv',
+  'wmv',
+  'webm',
+  '3gp',
+  'asf',
+  'rm',
+  'rmvb',
+  'vob',
+  'ts',
+  'mts',
+  'm2ts',
+  'm4v',
+]);
+
+const isVideoMediaPath = (filePath: string): boolean => {
+  const extension = filePath.split('.').pop()?.toLowerCase();
+  return Boolean(extension && VIDEO_MEDIA_EXTENSIONS.has(extension));
+};
 
 /** 工作台同款配音记忆配置（同 key 共享，向导改动同步为工作台默认） */
 interface PersistedDubbing {
   engineKey: string;
+  language?: string;
   voice: string;
   globalSpeed: number;
   cloneQuality?: 'standard' | 'high';
@@ -117,6 +149,7 @@ export default function TaskWizard() {
     typeof router.query.locale === 'string' ? router.query.locale : 'zh';
   const { t } = useTranslation('tasks');
   const { t: tMerge } = useTranslation('subtitleMerge');
+  const { t: commonT } = useTranslation('common');
 
   // ── 文件区 ────────────────────────────────────────────────────────────────
   // 支持三种输入形态：纯媒体（转写起步）、纯字幕（翻译/配音起步）、
@@ -331,10 +364,19 @@ export default function TaskWizard() {
   });
   const toggleGoal = (key: GoalKey) =>
     setGoals((prev) => ({ ...prev, [key]: !prev[key] }));
-  const videoAllowed = inputKind !== 'subtitle';
+  const nonVideoMediaFiles = mediaFiles.filter(
+    (file) => !isVideoMediaPath(file.filePath),
+  );
+  const videoAllowed =
+    inputKind !== 'subtitle' && nonVideoMediaFiles.length === 0;
   const videoOn = goals.video && videoAllowed;
   const dubOn = goals.dub;
   const translateOn = goals.translate;
+
+  useEffect(() => {
+    if (videoAllowed) return;
+    setGoals((prev) => (prev.video ? { ...prev, video: false } : prev));
+  }, [videoAllowed]);
 
   // ── 字幕段配置（本地表单 + InlineConfigBar 复用）─────────────────────────
   const { form, formData, loaded: formLoaded } = useLocalFormConfig();
@@ -401,7 +443,9 @@ export default function TaskWizard() {
     if (currentValid) return;
     const next = pickDefaultEngineModel(
       groups,
-      lastUsedTranscription ?? undefined,
+      formData.transcriptionEngine === 'parakeet'
+        ? { engine: 'parakeet', model: formData.model }
+        : (lastUsedTranscription ?? undefined),
     );
     if (next) {
       form.setValue('transcriptionEngine', next.engine);
@@ -462,6 +506,24 @@ export default function TaskWizard() {
       ''
     );
   }, [activeEngine, dubPersisted.voice]);
+
+  const automaticDubLanguage = resolveTtsLanguage({
+    subtitleLanguage: translateOn
+      ? formData?.targetLanguage
+      : formData?.sourceLanguage,
+    voiceLanguage: activeEngine?.voices.find((v) => v.id === activeVoice)?.lang,
+  });
+  const effectiveDubLanguage = resolveTtsLanguage({
+    language: dubPersisted.language,
+    subtitleLanguage: automaticDubLanguage,
+  });
+  const unsupportedDubLanguage =
+    activeEngine?.kind === 'local'
+      ? localTtsLanguageError(
+          activeEngine.key.slice('local:'.length),
+          effectiveDubLanguage,
+        )
+      : undefined;
 
   // ── 合成配置 ──────────────────────────────────────────────────────────────
   const [composeSubtitle, setComposeSubtitle] = useState<
@@ -642,6 +704,7 @@ export default function TaskWizard() {
             ? `local:${dub.engine.modelId}`
             : `cloud:${dub.engine.providerId}`,
         voice: dub.voice,
+        language: dub.language || 'auto',
         globalSpeed: dub.globalSpeed || 1,
         cloneQuality: dub.cloneQuality ?? prev.cloneQuality,
         localConcurrency: dub.localConcurrency ?? prev.localConcurrency,
@@ -710,7 +773,15 @@ export default function TaskWizard() {
         includeLocalCli: useLocalWhisper,
         asrProviders,
       });
-      if (!groups.length) {
+      if (hasUnavailableParakeetModel(systemInfo, formData)) {
+        list.push({
+          key: 'model',
+          text: t('parakeet.modelUnavailable', {
+            model: formData?.model || 'Parakeet',
+          }),
+          href: `/${locale}/engines`,
+        });
+      } else if (!groups.length) {
         list.push({
           key: 'model',
           text: t('wizard.blockNoModel'),
@@ -746,8 +817,22 @@ export default function TaskWizard() {
         href: `/${locale}/ttsServices`,
       });
     }
+    if (dubOn && unsupportedDubLanguage) {
+      list.push({
+        key: 'tts-language',
+        text: commonT('ttsLanguageUnsupported', {
+          language: unsupportedDubLanguage,
+        }),
+      });
+    }
     if (goals.video && !videoAllowed) {
-      list.push({ key: 'video', text: t('wizard.blockVideoNeedsMedia') });
+      list.push({
+        key: 'video',
+        text:
+          inputKind === 'subtitle'
+            ? t('wizard.blockVideoNeedsMedia')
+            : t('wizard.blockVideoNeedsVideoStream'),
+      });
     }
     if (
       !translateOn &&
@@ -797,12 +882,16 @@ export default function TaskWizard() {
     translateOn,
     providers,
     formData?.translateProvider,
+    formData?.transcriptionEngine,
+    formData?.model,
     formData?.aiSegmentation,
     formData?.aiCorrection,
     formData?.refineProvider,
     dubOn,
     activeEngine,
     activeVoice,
+    unsupportedDubLanguage,
+    commonT,
     goals.video,
     videoAllowed,
     videoOn,
@@ -837,6 +926,7 @@ export default function TaskWizard() {
         config.dub = {
           engine: dubEngine,
           voice: activeVoice,
+          language: dubPersisted.language || 'auto',
           globalSpeed: dubPersisted.globalSpeed || 1,
           cloneQuality: dubPersisted.cloneQuality ?? 'standard',
           localConcurrency: dubPersisted.localConcurrency ?? 1,
@@ -876,9 +966,6 @@ export default function TaskWizard() {
     if (!canStart || starting) return;
     setStarting(true);
     try {
-      const projectId = uuidv4();
-      const dubEngine = dubOn ? parseEngineKey(activeEngine!.key) : null;
-      // 配对模式：任务文件 = 媒体文件（携带配对字幕路径）；未配对字幕不进任务
       const taskFiles =
         inputKind === 'paired'
           ? pairing!.pairs.map((p) => ({
@@ -886,6 +973,22 @@ export default function TaskWizard() {
               providedSubtitlePath: p.subtitle.filePath,
             }))
           : files;
+      if (
+        !(await canStartParakeetTask(
+          taskFiles,
+          inputKind !== 'subtitle',
+          formData,
+        ))
+      ) {
+        toast.error(
+          t('parakeet.modelUnavailable', {
+            model: formData?.model || 'Parakeet',
+          }),
+        );
+        return;
+      }
+      const projectId = uuidv4();
+      const dubEngine = dubOn ? parseEngineKey(activeEngine!.key) : null;
       const payload = stripSpeakerDiarizationConfig({
         ...formData,
         taskType,
@@ -900,6 +1003,7 @@ export default function TaskWizard() {
               dub: {
                 engine: dubEngine,
                 voice: activeVoice,
+                language: dubPersisted.language || 'auto',
                 globalSpeed: dubPersisted.globalSpeed || 1,
                 cloneQuality: dubPersisted.cloneQuality ?? 'standard',
                 localConcurrency: dubPersisted.localConcurrency ?? 1,
@@ -968,7 +1072,11 @@ export default function TaskWizard() {
       icon: Clapperboard,
       checked: videoOn,
       disabled: !videoAllowed,
-      hint: !videoAllowed ? t('wizard.goalVideoNeedsMedia') : undefined,
+      hint: !videoAllowed
+        ? inputKind === 'subtitle'
+          ? t('wizard.goalVideoNeedsMedia')
+          : t('wizard.goalVideoNeedsVideoStream')
+        : undefined,
     },
   ];
 
@@ -1312,6 +1420,23 @@ export default function TaskWizard() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Label className="text-xs text-muted-foreground">
+                {commonT('ttsLanguage')}
+              </Label>
+              <div className="w-[180px] max-w-full">
+                <DubbingLanguageSelect
+                  value={dubPersisted.language}
+                  resolved={automaticDubLanguage}
+                  onChange={(language) =>
+                    setDubPersisted((prev: PersistedDubbing) => ({
+                      ...prev,
+                      language,
+                    }))
+                  }
+                />
+              </div>
             </div>
             <div className="flex items-center gap-1.5">
               <Label className="text-xs text-muted-foreground">

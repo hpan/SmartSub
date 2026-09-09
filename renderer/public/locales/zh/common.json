@@ -1,4 +1,10 @@
 {
+  "ttsLanguage": "配音语言",
+  "ttsVoiceLanguageMismatch": "当前音色主要使用{{voiceLang}}，朗读{{textLang}}时可能带有口音。",
+  "ttsLanguageAuto": "自动",
+  "ttsLanguageResolved": "自动（{{language}}）",
+  "ttsLanguageUnsupported": "当前模型不支持 {{language}}，请选择支持该语言的引擎。",
+  "ttsLanguageCloud": "云端发音由服务商模型和音色决定，请选择支持该语言的音色。",
   "notification": "消息通知",
   "nav": {
     "launchpad": "启动台",
@@ -327,13 +333,14 @@
   "gpuModeCpuOnly": "仅 CPU",
   "cpuModeBadge": "CPU 模式",
   "cpuModeTip": "当前使用 CPU 转写，点击查看加速选项",
+  "coarseTimeline": "粗粒度时间轴",
   "engineBadge": {
     "builtin": "Whisper.cpp",
     "fasterWhisper": "Faster-Whisper",
     "funasr": "FunASR",
     "qwen": "Qwen3-ASR",
     "fireRedAsr": "FireRedASR",
-    "parakeet": "Parakeet TDT",
+    "parakeet": "Parakeet",
     "localCli": "本地命令",
     "cloud": "云端听写"
   },

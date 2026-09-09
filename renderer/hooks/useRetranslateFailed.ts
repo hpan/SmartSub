@@ -61,14 +61,27 @@ export function useRetranslateFailed({
   useEffect(() => {
     const cleanup = window.ipc.on(
       'retranslateProgress',
-      (data: { batchId?: string; done?: number; total?: number }) => {
+      (data: {
+        batchId?: string;
+        done?: number;
+        total?: number;
+        fallback?: { fromName: string; toName: string };
+      }) => {
         if (!batchIdRef.current || data?.batchId !== batchIdRef.current) return;
-        setDone(data.done ?? 0);
-        setTotal(data.total ?? 0);
+        if (typeof data.done === 'number') setDone(data.done);
+        if (typeof data.total === 'number') setTotal(data.total);
+        if (data.fallback) {
+          toast.info(
+            t('retranslateProviderFallback', {
+              from: data.fallback.fromName,
+              to: data.fallback.toName,
+            }),
+          );
+        }
       },
     );
     return cleanup;
-  }, []);
+  }, [t]);
 
   const start = useCallback(async () => {
     if (batchIdRef.current) return;
@@ -137,9 +150,20 @@ export function useRetranslateFailed({
         const next = latest.map((row) => {
           const hit = resultMap.get(`${row.id}|${row.startEndTime}`);
           // 只回填仍为空的行，避免覆盖用户在重翻期间手动填写的内容
-          if (hit && (!row.targetContent || !row.targetContent.trim())) {
+          if (
+            hit &&
+            (row.translationStatus === 'failed' ||
+              !row.targetContent ||
+              !row.targetContent.trim() ||
+              /^\[翻译失败:/.test(row.targetContent.trim()))
+          ) {
             applied += 1;
-            return { ...row, targetContent: hit };
+            return {
+              ...row,
+              targetContent: hit,
+              translationStatus: 'success' as const,
+              translationError: undefined,
+            };
           }
           return row;
         });

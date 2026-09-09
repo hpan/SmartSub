@@ -45,6 +45,8 @@ import { MirrorDownloader } from '../main/helpers/download/mirrorDownloader';
 import {
   canHaveEmbeddedSubtitle,
   parseSubtitleStreams,
+  shouldInvalidateEmbeddedSubtitleResult,
+  shouldUseEmbeddedSubtitles,
   srtHasCues,
 } from '../main/helpers/embeddedSubtitleParser';
 import { decideCloseIntent } from '../main/helpers/windowCloseDecision';
@@ -73,7 +75,17 @@ import {
   resolveQwenSelection,
 } from '../main/helpers/qwenModelCatalog';
 import { FIRERED_MODELS } from '../main/helpers/fireRedModelCatalog';
-import { PARAKEET_MODELS } from '../main/helpers/parakeetModelCatalog';
+import {
+  PARAKEET_MODELS,
+  getParakeetArchiveUrl,
+  getParakeetSourceOrder,
+} from '../main/helpers/parakeetModelCatalog';
+import {
+  PARAKEET_MODEL_IDS,
+  resolveParakeetSelection,
+  isParakeetLanguageMismatch,
+} from '../types/parakeet';
+import { canStartParakeetTask } from '../renderer/lib/parakeetTask';
 import {
   CT2_REQUIRED_FILES,
   CT2_REQUIRED_CONFIG_ARRAYS,
@@ -103,6 +115,7 @@ import {
   buildQwenRecognizerConfig,
   buildFireRedRecognizerConfig,
   buildParakeetRecognizerConfig,
+  buildParakeetCtcRecognizerConfig,
   segmentTiming,
   progressPercent,
 } from '../main/helpers/sherpaOnnx/sherpaConfig';
@@ -120,6 +133,8 @@ import {
   getEngineModelGroups,
   hasModelsForEngine,
   hasAnyModelAnyEngine,
+  hasUnavailableParakeetModel,
+  pickDefaultEngineModel,
 } from '../renderer/lib/engineModels';
 import {
   formatFunasrDownloadFailureToast,
@@ -442,6 +457,16 @@ eq(
   isPinnedTaskConfigSnapshot({ dub: { engine: 'local' } }),
   true,
   'task snapshot: existing dubbing pinning remains supported',
+);
+eq(
+  isPinnedTaskConfigSnapshot({ useEmbeddedSubtitles: false }),
+  true,
+  'task snapshot: forcing ASR pins the task-level source choice',
+);
+eq(
+  isPinnedTaskConfigSnapshot({ useEmbeddedSubtitles: true }),
+  false,
+  'task snapshot: default embedded-subtitle preference stays editable',
 );
 
 // --- secondsToSrtTime ---
@@ -939,6 +964,37 @@ eq(canHaveEmbeddedSubtitle('.MP4'), true, 'embed: .MP4 case-insensitive');
 eq(canHaveEmbeddedSubtitle('.mp3'), false, 'embed: .mp3 audio skipped');
 eq(canHaveEmbeddedSubtitle('.avi'), false, 'embed: .avi skipped');
 eq(canHaveEmbeddedSubtitle(''), false, 'embed: empty ext skipped');
+
+// --- embedded subtitle: task-level preference (issue #419) ---
+eq(
+  shouldUseEmbeddedSubtitles(undefined),
+  true,
+  'embed: legacy task without preference keeps extraction enabled',
+);
+eq(
+  shouldUseEmbeddedSubtitles({ useEmbeddedSubtitles: true }),
+  true,
+  'embed: explicit preference enables extraction',
+);
+eq(
+  shouldUseEmbeddedSubtitles({ useEmbeddedSubtitles: false }),
+  false,
+  'embed: disabled preference forces ASR',
+);
+eq(
+  shouldInvalidateEmbeddedSubtitleResult(true, {
+    useEmbeddedSubtitles: false,
+  }),
+  true,
+  'embed: force ASR invalidates a prior embedded-subtitle result on retry',
+);
+eq(
+  shouldInvalidateEmbeddedSubtitleResult(false, {
+    useEmbeddedSubtitles: false,
+  }),
+  false,
+  'embed: force ASR still allows reuse of an existing ASR result',
+);
 
 // --- embedded subtitle: srtHasCues ---
 eq(
@@ -1495,6 +1551,179 @@ eq(
 );
 
 const PARAKEET_RP = { num_threads: 4, provider: 'cpu' };
+const PARAKEET_V2 = 'parakeet-tdt-0.6b-v2';
+const PARAKEET_V3 = 'parakeet-tdt-0.6b-v3';
+const PARAKEET_JA = 'parakeet-tdt_ctc-0.6b-ja';
+eq(
+  PARAKEET_MODELS[PARAKEET_JA].requiredFiles,
+  ['model.int8.onnx', 'tokens.txt'],
+  'parakeet: CTC import requires single model and tokens',
+);
+eq(
+  PARAKEET_MODELS[PARAKEET_V2].requiredFiles,
+  PARAKEET_MODELS[PARAKEET_V3].requiredFiles,
+  'parakeet: v2 reuses TDT layout',
+);
+for (const id of PARAKEET_MODEL_IDS) {
+  const spec = PARAKEET_MODELS[id];
+  eq(
+    spec.languageCount,
+    spec.languages.length,
+    `parakeet: ${id} language metadata`,
+  );
+  eq(
+    getParakeetArchiveUrl(spec, 'github'),
+    `https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${spec.archiveInnerDir}.tar.bz2`,
+    `parakeet: ${id} archive`,
+  );
+  eq(
+    resolveParakeetSelection(id, [...PARAKEET_MODEL_IDS]),
+    { id },
+    `parakeet: explicit ${id} preserved`,
+  );
+}
+eq(
+  getParakeetSourceOrder('github'),
+  ['github', 'ghproxy'],
+  'parakeet: requested source takes precedence',
+);
+eq(
+  resolveParakeetSelection(PARAKEET_JA, [PARAKEET_V2, PARAKEET_V3]),
+  null,
+  'parakeet: missing Japanese model cannot fall back to English',
+);
+eq(
+  resolveParakeetSelection('unknown', [...PARAKEET_MODEL_IDS]),
+  null,
+  'parakeet: unknown model rejected',
+);
+eq(
+  resolveParakeetSelection(undefined, [PARAKEET_V2, PARAKEET_JA]),
+  null,
+  'parakeet: no implicit language model choice',
+);
+eq(
+  resolveParakeetSelection(undefined, [...PARAKEET_MODEL_IDS]),
+  { id: PARAKEET_V3 },
+  'parakeet: legacy default remains v3',
+);
+eq(
+  resolveParakeetSelection(PARAKEET_V2.toUpperCase(), [PARAKEET_V2]),
+  { id: PARAKEET_V2 },
+  'parakeet: normalize model id',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_V2, 'ja'),
+  true,
+  'parakeet: English model warns for Japanese',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_JA, 'en'),
+  true,
+  'parakeet: Japanese model warns for English',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_JA, 'ja-JP'),
+  false,
+  'parakeet: Japanese locale supported',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_V2, 'en_US'),
+  false,
+  'parakeet: English locale supported',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_V3, 'de-DE'),
+  false,
+  'parakeet: European languages retained',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_V3, 'zh'),
+  true,
+  'parakeet: v3 does not support Chinese',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_JA, 'auto'),
+  false,
+  'parakeet: auto has no mismatch warning',
+);
+eq(
+  isParakeetLanguageMismatch(PARAKEET_JA, undefined),
+  false,
+  'parakeet: absent language has no warning',
+);
+eq(
+  hasUnavailableParakeetModel(parakeetReady, {
+    transcriptionEngine: 'parakeet',
+    model: PARAKEET_JA,
+  }),
+  true,
+  'parakeet: selected missing model blocks',
+);
+eq(
+  hasUnavailableParakeetModel(parakeetReady, {
+    transcriptionEngine: 'parakeet',
+    model: PARAKEET_V3,
+  }),
+  false,
+  'parakeet: installed selection ready',
+);
+eq(
+  hasUnavailableParakeetModel(parakeetReady, {
+    transcriptionEngine: 'builtin',
+    model: 'missing',
+  }),
+  false,
+  'parakeet: guard does not change other engines',
+);
+eq(
+  hasUnavailableParakeetModel(parakeetReady, {
+    transcriptionEngine: 'parakeet',
+  }),
+  false,
+  'parakeet: absent selection may use installed v3',
+);
+eq(
+  hasUnavailableParakeetModel(
+    { parakeetVadInstalled: true, parakeetModelsInstalled: [PARAKEET_JA] },
+    { transcriptionEngine: 'parakeet' },
+  ),
+  true,
+  'parakeet: absent selection cannot choose Japanese implicitly',
+);
+eq(
+  pickDefaultEngineModel(getEngineModelGroups(parakeetReady), {
+    engine: 'parakeet',
+    model: PARAKEET_JA,
+  }),
+  { engine: 'parakeet', model: PARAKEET_JA },
+  'parakeet: frontend preserves deleted selection',
+);
+eq(
+  pickDefaultEngineModel([
+    { engine: 'parakeet', models: [PARAKEET_V2, PARAKEET_JA] },
+  ]),
+  { engine: 'parakeet', model: '' },
+  'parakeet: frontend requires explicit choice without v3',
+);
+eq(
+  buildParakeetCtcRecognizerConfig(
+    '/ja/model.int8.onnx',
+    '/ja/tokens.txt',
+    PARAKEET_RP,
+  ),
+  {
+    featConfig: { sampleRate: 16000, featureDim: 80 },
+    modelConfig: {
+      nemoCtc: { model: '/ja/model.int8.onnx' },
+      tokens: '/ja/tokens.txt',
+      numThreads: 4,
+      provider: 'cpu',
+      debug: 0,
+    },
+  },
+  'parakeet: CTC binding config',
+);
 const parakeetRecognizerConfig = buildParakeetRecognizerConfig(
   {
     encoder: '/m/encoder.int8.onnx',
@@ -2867,6 +3096,15 @@ eq(
       ['00:00:01,100', '00:00:01,400', '字'],
     ],
     'merge: skip when joined width would exceed maxWidth',
+  );
+  // 阿拉伯文等非 ASCII 字母也属于实义字符，完整词不能被误判成碎片并回上一条。
+  eq(
+    mergeShortCues([T('0', '1.0', 'عيون'), T('1.0', '1.4', 'ماما.')]),
+    [
+      ['00:00:00,000', '00:00:01,000', 'عيون'],
+      ['00:00:01,000', '00:00:01,400', 'ماما.'],
+    ],
+    'merge: Arabic words are not misclassified as short fragments',
   );
 }
 
@@ -4729,7 +4967,7 @@ eq(
 );
 
 // ===========================================================================
-// ElevenLabs Scribe：Base URL 归一 / 端点拼接 / 词映射（过滤 spacing）/ 重试判定
+// ElevenLabs Scribe：Base URL 归一 / 端点拼接 / 词映射（折叠 spacing）/ 重试判定
 // ===========================================================================
 
 // --- elevenlabsUtils: normalizeElevenLabsBaseURL ---
@@ -4771,14 +5009,27 @@ eq(
   mapElevenLabsWords([
     { text: 'Hello', start: 0, end: 0.4, type: 'word' },
     { text: ' ', start: 0.4, end: 0.4, type: 'spacing' },
+    { text: '\t', start: 0.4, end: 0.4, type: 'spacing' },
     { text: 'world', start: 0.4, end: 0.9, type: 'word' },
     { text: '[laughs]', start: 0.9, end: 1.2, type: 'audio_event' },
   ]),
   [
     { word: 'Hello', start: 0, end: 0.4 },
-    { word: 'world', start: 0.4, end: 0.9 },
+    { word: ' world', start: 0.4, end: 0.9 },
   ],
-  'eleven: keeps word tokens, drops spacing + audio_event',
+  'eleven: folds spacing into next word and drops audio_event',
+);
+eq(
+  wordCuesFromResult({
+    words: mapElevenLabsWords([
+      { text: 'Hello', start: 0, end: 0.4, type: 'word' },
+      { text: ' ', start: 0.4, end: 0.4, type: 'spacing' },
+      { text: 'world.', start: 0.4, end: 0.9, type: 'word' },
+    ]),
+    text: 'Hello world.',
+  }).map((cue) => cue[2]),
+  ['Hello world.'],
+  'eleven: explicit spacing does not duplicate Latin automatic spacing',
 );
 eq(
   mapElevenLabsWords([
@@ -4793,6 +5044,35 @@ eq(
   'eleven: no-type kept; drops non-finite times',
 );
 eq(mapElevenLabsWords(null), [], 'eleven: non-array -> []');
+
+const elevenArabicText = 'ماما أبي ألعب بالآيباد. طيب يا عيون ماما.';
+const elevenArabicWords = mapElevenLabsWords([
+  { text: 'ماما', start: 0, end: 0.4, type: 'word' },
+  { text: ' ', start: 0.4, end: 0.4, type: 'spacing' },
+  { text: 'أبي', start: 0.4, end: 0.7, type: 'word' },
+  { text: ' ', start: 0.7, end: 0.7, type: 'spacing' },
+  { text: 'ألعب', start: 0.7, end: 1, type: 'word' },
+  { text: ' ', start: 1, end: 1, type: 'spacing' },
+  { text: 'بالآيباد.', start: 1, end: 1.5, type: 'word' },
+  { text: ' ', start: 1.5, end: 1.5, type: 'spacing' },
+  { text: 'طيب', start: 1.5, end: 1.8, type: 'word' },
+  { text: ' ', start: 1.8, end: 1.8, type: 'spacing' },
+  { text: 'يا', start: 1.8, end: 2, type: 'word' },
+  { text: ' ', start: 2, end: 2, type: 'spacing' },
+  { text: 'عيون', start: 2, end: 2.3, type: 'word' },
+  { text: ' ', start: 2.3, end: 2.3, type: 'spacing' },
+  { text: 'ماما.', start: 2.3, end: 2.7, type: 'word' },
+]);
+eq(
+  wordCuesFromResult({
+    words: elevenArabicWords,
+    text: elevenArabicText,
+  })
+    .map((cue) => cue[2])
+    .join(' '),
+  elevenArabicText,
+  'eleven: issue #449 Arabic spacing survives through final subtitle cue',
+);
 
 // --- elevenlabsUtils: isRetriableStatus ---
 eq(isRetriableStatus(429), true, 'eleven: 429 retriable');
@@ -6315,6 +6595,130 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 async function runAsyncConcurrencyTests(): Promise<void> {
+  const previousWindow = (globalThis as any).window;
+  try {
+    let statusReads = 0;
+    let installed = [PARAKEET_V3];
+    let subtitleExists = true;
+    (globalThis as any).window = {
+      ipc: {
+        invoke: async (channel: string, args?: { filePath: string }) => {
+          if (channel === 'checkFileExists') {
+            eq(
+              args?.filePath,
+              '/test.srt',
+              'parakeet: verifies subtitle artifact',
+            );
+            return { exists: subtitleExists };
+          }
+          eq(
+            channel,
+            'getParakeetModelStatus',
+            'parakeet: fresh model status IPC',
+          );
+          statusReads++;
+          return {
+            success: true,
+            engineInstalled: true,
+            vadInstalled: true,
+            models: installed.map((id) => ({ id, installed: true })),
+          };
+        },
+      },
+    };
+    const form = { transcriptionEngine: 'parakeet', model: PARAKEET_JA };
+    eq(
+      await canStartParakeetTask([{ filePath: '/test.wav' }], true, form),
+      false,
+      'parakeet: start/retry rejects deleted model',
+    );
+    installed = [PARAKEET_JA];
+    eq(
+      await canStartParakeetTask([{ filePath: '/test.wav' }], true, form),
+      true,
+      'parakeet: fresh status recognizes reinstalled model',
+    );
+    const beforeSkipped = statusReads;
+    eq(
+      await canStartParakeetTask([{ filePath: '/test.srt' }], false, form),
+      true,
+      'parakeet: translation only requires no model',
+    );
+    eq(
+      await canStartParakeetTask(
+        [{ filePath: '/test.mp4', providedSubtitlePath: '/test.srt' }],
+        true,
+        form,
+      ),
+      true,
+      'parakeet: paired subtitles require no model',
+    );
+    eq(
+      await canStartParakeetTask(
+        [
+          {
+            filePath: '/test.mp4',
+            extractSubtitle: 'done',
+            srtFile: '/test.srt',
+          },
+        ],
+        true,
+        { ...form, model: '', dub: {} },
+      ),
+      true,
+      'parakeet: downstream pipeline retry remains available',
+    );
+    eq(
+      statusReads,
+      beforeSkipped,
+      'parakeet: skipped ASR does not query model status',
+    );
+    installed = [];
+    subtitleExists = false;
+    eq(
+      await canStartParakeetTask(
+        [{ filePath: '/test.mp4', providedSubtitlePath: '/test.srt' }],
+        true,
+        form,
+      ),
+      false,
+      'parakeet: deleted paired subtitle requires installed model',
+    );
+    const completedAsr = {
+      filePath: '/test.mp4',
+      extractSubtitle: 'done',
+      srtFile: '/test.srt',
+    };
+    eq(
+      await canStartParakeetTask([completedAsr], true, {
+        ...form,
+        compose: {},
+      }),
+      false,
+      'parakeet: deleted pipeline subtitle requires installed model',
+    );
+    subtitleExists = true;
+    eq(
+      await canStartParakeetTask(
+        [{ ...completedAsr, embeddedSubtitle: true }],
+        true,
+        { ...form, compose: {}, useEmbeddedSubtitles: false },
+      ),
+      false,
+      'parakeet: invalidated embedded subtitle requires installed model',
+    );
+    (globalThis as any).window.ipc.invoke = async () => {
+      throw new Error('IPC unavailable');
+    };
+    eq(
+      await canStartParakeetTask([{ filePath: '/test.wav' }], true, form),
+      false,
+      'parakeet: unavailable status cannot start',
+    );
+  } finally {
+    if (previousWindow === undefined) delete (globalThis as any).window;
+    else (globalThis as any).window = previousWindow;
+  }
   // 可取消 JSON 请求：重定向后的慢文件树请求仍必须响应同一个 AbortSignal。
   {
     const server = http.createServer((req, res) => {

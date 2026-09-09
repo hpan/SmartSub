@@ -1,4 +1,10 @@
 {
+  "ttsLanguage": "Speech language",
+  "ttsVoiceLanguageMismatch": "This voice is primarily {{voiceLang}}. Speech in {{textLang}} may have an accent.",
+  "ttsLanguageAuto": "Automatic",
+  "ttsLanguageResolved": "Automatic ({{language}})",
+  "ttsLanguageUnsupported": "This model does not support {{language}}. Choose a compatible engine.",
+  "ttsLanguageCloud": "Pronunciation is controlled by the cloud model and voice. Choose a voice that supports this language.",
   "notification": "Notification",
   "nav": {
     "launchpad": "Launchpad",
@@ -327,13 +333,14 @@
   "gpuModeCpuOnly": "CPU only",
   "cpuModeBadge": "CPU mode",
   "cpuModeTip": "Transcription runs on CPU. Click to view acceleration options.",
+  "coarseTimeline": "Coarse timeline",
   "engineBadge": {
     "builtin": "Whisper.cpp",
     "fasterWhisper": "Faster-Whisper",
     "funasr": "FunASR",
     "qwen": "Qwen3-ASR",
     "fireRedAsr": "FireRedASR",
-    "parakeet": "Parakeet TDT",
+    "parakeet": "Parakeet",
     "localCli": "Local command",
     "cloud": "Cloud ASR"
   },

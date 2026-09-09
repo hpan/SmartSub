@@ -1,4 +1,8 @@
 {
+  "parakeet": {
+    "modelUnavailable": "模型 {{model}} 未就绪。请在任务配置中选择已安装的模型；固定配置任务可重新安装原模型或新建任务。",
+    "languageMismatch": "{{model}} 不支持源语言 {{language}}，识别结果可能不准确。当前选择已保留。"
+  },
   "pageTitle": {
     "generate-translate": "视频 → 双语字幕",
     "generate": "视频 → 原文字幕",
@@ -16,7 +20,8 @@
     "qualityOriginal": "原画质",
     "qualityHigh": "高画质",
     "qualityStandard": "标准画质",
-    "encoderHardware": "硬件加速"
+    "encoderHardware": "硬件加速",
+    "forceTranscription": "已关闭，强制听写"
   },
   "wizard": {
     "filesTitle": "第一步 · 放入文件",
@@ -47,6 +52,7 @@
     "goalSubtitlePaired": "使用你放入的同名字幕，跳过听写",
     "goalSubtitleAlways": "视频任务必产出字幕",
     "goalVideoNeedsMedia": "需要放入视频文件才能合成",
+    "goalVideoNeedsVideoStream": "纯音频文件不能生成成品视频",
     "chainLabel": "处理流程：",
     "chainEmpty": "选择上方目标后展示处理流程",
     "subtitleConfigTitle": "字幕设置",
@@ -83,6 +89,7 @@
     "blockNoProvider": "翻译服务尚未配置",
     "blockNoTts": "配音引擎尚未就绪",
     "blockVideoNeedsMedia": "成品视频需要视频输入，请取消勾选或改放视频文件",
+    "blockVideoNeedsVideoStream": "成品视频需要视频流，请移除纯音频文件或取消勾选",
     "blockUnpairedMedia": "有 {{count}} 个视频还没配上字幕，请在视频行选择字幕、补充文件或移除它们",
     "blockNoGoal": "请至少勾选一个要得到的产物",
     "blockRefineFollow": "AI 精修的「跟随翻译服务」无法解析（翻译未开启或非 AI 类型），请在工具栏「断句与精修」里显式选择精修服务商",
@@ -112,7 +119,8 @@
     "targetLanguage": "翻译成",
     "provider": "翻译服务",
     "style": "输出内容",
-    "format": "字幕格式"
+    "format": "字幕格式",
+    "embeddedSubtitles": "优先内封字幕"
   },
   "manuscript": {
     "label": "参考文稿",
@@ -339,6 +347,8 @@
     "remove": "移除",
     "embeddedSubtitle": "内封软字幕直提（已跳过听写/ASR）",
     "speakerDiarizationMetadataSaveFailed": "角色分离已完成，但角色 metadata 写入失败；字幕处理已继续，请查看日志后重试。",
+    "missedSpeechWarning": "疑似漏听 {{count}} 处（最高等级：{{level}}），请打开校对复核",
+    "missedSpeechLevel": { "low": "低", "medium": "中", "high": "高" },
     "proofreadTxtUnsupported": "TXT 文件不包含时间轴，暂不支持校对。请生成 SRT/VTT/ASS 后校对，或校对完成后另存为 TXT。",
     "proofreadTxtUnsupportedShort": "TXT 不支持校对"
   },

@@ -32,6 +32,23 @@
   "pleaseInputCustomTargetSrtFileName": "Please Input Custom Target Srt File Name",
   "extractAudio": "Extract Audio",
   "extractSubtitle": "Extract Subtitle",
+  "missedSpeech": {
+    "title": "Suspected missed speech",
+    "count": "{{count}} suspected missed speech ranges",
+    "range": "Suspected missed speech range",
+    "taskWarning": "{{count}} suspected missed speech ranges, highest level: {{level}}",
+    "caution": "For manual review only; this is not a definitive detection",
+    "previous": "Previous suspected missed speech range",
+    "next": "Next suspected missed speech range",
+    "listen": "Listen to this range",
+    "level": { "low": "low", "medium": "medium", "high": "high" },
+    "signal": {
+      "energySpeech": "audio energy indicates speech",
+      "engineVad": "engine VAD detected speech",
+      "subtitleGap": "subtitle coverage has a gap",
+      "wordGap": "word timeline has a gap"
+    }
+  },
   "translateSubtitle": "Translate Subtitle",
   "noTask": "No tasks to be processed",
   "allFilesProcessed": "All files have been processed",
@@ -114,6 +131,7 @@
   "retranslateNoResult": "No translation results to apply",
   "retranslateDone": "Retranslation complete, {{count}} lines filled",
   "retranslateCancelledPartial": "Cancelled, {{count}} lines filled",
+  "retranslateProviderFallback": "{{from}} is temporarily unavailable. Continuing with {{to}}",
   "translationFailedPlaceholder": "Translation failed, please enter manually",
   "history": "History",
   "clickToSelectVideo": "Click to select video file",
