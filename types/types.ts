@@ -7,6 +7,10 @@ import type {
   DubbingOverlapMode,
 } from './dubbing';
 import type { EncoderMode, SubtitleStyle, VideoQuality } from './subtitleMerge';
+import type {
+  SubtitleOutputFiles,
+  SubtitleOutputFormat,
+} from './subtitleOutput';
 
 export interface ISystemInfo {
   modelsInstalled: string[];
@@ -80,7 +84,7 @@ export interface ManuscriptMatchSummary {
   averageConfidence: number;
 }
 
-export interface IFiles {
+export interface IFiles extends SubtitleOutputFiles {
   uuid: string;
   filePath: string;
   fileName: string;
@@ -103,6 +107,16 @@ export interface IFiles {
   tempAudioFile?: string;
   translatedSrtFile?: string;
   tempTranslatedSrtFile?: string;
+  exportSubtitle?: '' | 'loading' | 'done' | 'error';
+  exportSubtitleError?: string;
+  /** Canonical inputs retained until export succeeds, so retry never calls ASR/translation. */
+  subtitleExportCheckpoint?: {
+    sourceSrtPath?: string;
+    translatedSrtPath?: string;
+    sourceOwned: boolean;
+    translationActive: boolean;
+    translateOk: boolean;
+  };
   /** 字幕翻译失败行；译文文件保留原文作为可播放回退。 */
   translationFailures?: Array<{ subtitleId: string; error?: string }>;
   /** 校对用无损中间态 sidecar，保存源文/译文/时间轴，避免直接读写有损交付物。 */
@@ -120,6 +134,10 @@ export interface IFiles {
   /** 仅供日志/tooltip 兜底的诊断细节，不参与本地化键。 */
   manuscriptMatchErrorDetail?: string;
   manuscriptMatchSummary?: ManuscriptMatchSummary;
+  /** 单文件独立绑定的参考文稿路径（若指定，优先于 formData.manuscriptPath；设为 '__none__' 表示显式不匹配） */
+  manuscriptPath?: string;
+  /** 单文件独立绑定的参考文稿显示名 */
+  manuscriptName?: string;
   /** 本次转写实际使用的后端标签（如 "CUDA 12.4.0" / "Vulkan" / "CPU"） */
   whisperBackend?: string;
   /** 该文件走了内封软字幕直提（跳过 ASR；角色分离开启时仍会抽音频）：用于任务列表标识 */
@@ -146,6 +164,13 @@ export interface IFiles {
   /** 合成阶段产物：成品视频路径 */
   finalVideoPath?: string;
 }
+
+export const TRANSLATION_INCOMPLETE_PIPELINE_PAUSED =
+  'TRANSLATION_INCOMPLETE_PIPELINE_PAUSED';
+export const TRANSLATION_INCOMPLETE_FOR_DUBBING =
+  'TRANSLATION_INCOMPLETE_FOR_DUBBING';
+export const TRANSLATION_INCOMPLETE_FOR_COMPOSE =
+  'TRANSLATION_INCOMPLETE_FOR_COMPOSE';
 
 export type TaskProjectType =
   | 'generateAndTranslate'
@@ -238,7 +263,9 @@ export interface IFormData {
   sourceLanguage: string;
   targetLanguage: string;
   translateRetryTimes: string;
-  subtitleOutputFormat?: 'srt' | 'vtt' | 'ass' | 'lrc' | 'txt';
+  subtitleOutputFormat?: SubtitleOutputFormat;
+  /** Missing on legacy tasks; the singular format remains the compatibility fallback. */
+  subtitleOutputFormats?: SubtitleOutputFormat[];
   /**
    * 生成字幕时单条字幕最大显示字数 / 宽度（CJK 记 2、其余记 1）。
    * 0 或空 = 智能断句（引擎默认）；-1 = 不限制长度（仅按停顿/标点断句，不按字数硬切）；

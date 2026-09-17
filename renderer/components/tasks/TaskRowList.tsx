@@ -7,6 +7,7 @@ import {
   CircleAlert,
   Diamond,
   Edit2,
+  FileText,
   FileUp,
   FolderOpen,
   Loader2,
@@ -45,13 +46,20 @@ import {
   type RailItem,
   type StageDef,
 } from './stageUtils';
-import { SPEAKER_DIARIZATION_METADATA_SAVE_FAILED } from '../../../types/speakerDiarization';
+import {
+  SPEAKER_DIARIZATION_METADATA_SAVE_FAILED,
+  TRANSLATION_INCOMPLETE_PIPELINE_PAUSED,
+  TRANSLATION_INCOMPLETE_FOR_DUBBING,
+  TRANSLATION_INCOMPLETE_FOR_COMPOSE,
+} from '../../../types';
+import { ManuscriptRowBadge } from './ManuscriptRowBadge';
 
 interface TaskRowListProps {
   files: any[];
   typeDef: TaskTypeDef;
   formData: any;
   taskStatus: string;
+  manuscriptPool?: any[];
   onProofread: (file: any) => void;
   onDelete: (uuid: string) => void;
   onRetry: (file: any) => void;
@@ -59,6 +67,12 @@ interface TaskRowListProps {
   onReleaseGate?: (file: any, gate: 'subtitle' | 'dubbing') => void;
   /** 打开配音工作台检查该文件的配音 */
   onInspectDubbing?: (file: any) => void;
+  onAssignManuscript?: (
+    file: any,
+    manuscriptPath: string,
+    manuscriptName?: string,
+  ) => void;
+  onImport?: () => void;
 }
 
 export function RailChips({
@@ -141,6 +155,12 @@ export function RailChips({
               ),
             })
           : undefined;
+        const translationFailureCount = file?.translationFailures?.length || 0;
+        const translationFailureTitle = translationFailureCount
+          ? t('row.translationFailureWarning', {
+              count: translationFailureCount,
+            })
+          : undefined;
         return (
           <React.Fragment key={stage.key}>
             {index > 0 && <ChevronRight className="h-3 w-3 text-faint" />}
@@ -156,7 +176,9 @@ export function RailChips({
               title={
                 stage.key === 'extractSubtitle' && missedSpeechTitle
                   ? missedSpeechTitle
-                  : manuscriptTitle
+                  : stage.key === 'translateSubtitle' && translationFailureTitle
+                    ? translationFailureTitle
+                    : manuscriptTitle
               }
             >
               {status === 'loading' && (
@@ -193,6 +215,16 @@ export function RailChips({
                   </span>
                 </span>
               ) : null}
+              {stage.key === 'translateSubtitle' &&
+              translationFailureCount > 0 ? (
+                <span
+                  className="inline-flex items-center gap-0.5 text-warning"
+                  title={translationFailureTitle}
+                >
+                  <CircleAlert className="h-3 w-3" />
+                  <span className="text-[10px]">{translationFailureCount}</span>
+                </span>
+              ) : null}
             </span>
           </React.Fragment>
         );
@@ -206,11 +238,14 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
   typeDef,
   formData,
   taskStatus,
+  manuscriptPool,
   onProofread,
   onDelete,
   onRetry,
   onReleaseGate,
   onInspectDubbing,
+  onAssignManuscript,
+  onImport,
 }) => {
   const { t } = useTranslation('tasks');
   const queueBusy =
@@ -252,7 +287,16 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
   };
 
   const handleImport = () => {
-    const fileType = typeDef.accepts === 'subtitle' ? 'srt' : 'media';
+    if (onImport) {
+      onImport();
+      return;
+    }
+    const fileType =
+      typeDef.accepts === 'subtitle'
+        ? 'srt'
+        : typeDef.needsModel
+          ? 'media-and-manuscript'
+          : 'media';
     window?.ipc?.send('openDialog', { dialogType: 'openDialog', fileType });
   };
 
@@ -266,6 +310,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
   if (!files.length) {
     // 空态：统一三步引导（P0 动线统一，与配音/合成页同形态）
     const subtitleInput = typeDef.accepts === 'subtitle';
+    const canAcceptManuscript = !subtitleInput && Boolean(typeDef.needsModel);
     return (
       <div
         className="h-[380px] cursor-pointer rounded-lg border-2 border-dashed border-border-strong transition-colors hover:border-primary/50"
@@ -278,7 +323,9 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
               title: t('empty.step1'),
               desc: subtitleInput
                 ? t('empty.subtitleFormats')
-                : t('empty.mediaFormats'),
+                : canAcceptManuscript
+                  ? t('empty.mediaAndManuscriptFormats')
+                  : t('empty.mediaFormats'),
             },
             {
               icon: Settings2,
@@ -292,18 +339,34 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
             },
           ]}
           actions={
-            <Button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleImport();
-              }}
-            >
-              <FileUp className="h-4 w-4" />
-              {t('import')}
-            </Button>
+            <div className="flex flex-col items-center gap-2">
+              {Boolean(canAcceptManuscript && manuscriptPool?.length) && (
+                <div className="flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>
+                    {t('manuscript.emptyWaitingVideos', {
+                      count: manuscriptPool!.length,
+                    })}
+                  </span>
+                </div>
+              )}
+              <Button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleImport();
+                }}
+              >
+                <FileUp className="h-4 w-4" />
+                {t('import')}
+              </Button>
+            </div>
           }
           dropHint={
-            subtitleInput ? t('empty.dragSubtitle') : t('empty.dragMedia')
+            subtitleInput
+              ? t('empty.dragSubtitle')
+              : canAcceptManuscript
+                ? t('empty.dragMediaAndManuscript')
+                : t('empty.dragMedia')
           }
         />
       </div>
@@ -320,7 +383,17 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
         const failed = hasFileError(file, stages);
         const rawError = failed ? getFileError(file, stages) : '';
         const errorMsg =
-          rawError === 'TASK_INTERRUPTED' ? t('interrupted') : rawError;
+          rawError === 'TASK_INTERRUPTED'
+            ? t('interrupted')
+            : rawError === TRANSLATION_INCOMPLETE_PIPELINE_PAUSED
+              ? t('row.translationIncompletePipelinePaused', {
+                  count: file?.translationFailures?.length || 0,
+                })
+              : rawError === TRANSLATION_INCOMPLETE_FOR_DUBBING
+                ? t('row.translationIncompleteForDubbing')
+                : rawError === TRANSLATION_INCOMPLETE_FOR_COMPOSE
+                  ? t('row.translationIncompleteForCompose')
+                  : rawError;
         const rawWarning = getFileWarning(file, stages);
         const warningMsg =
           rawWarning === SPEAKER_DIARIZATION_METADATA_SAVE_FAILED
@@ -334,7 +407,17 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
               ),
             })
           : '';
-        const displayWarning = [warningMsg, missedSpeechWarning]
+        const translationFailureWarning =
+          !failed && file?.translationFailures?.length
+            ? t('row.translationFailureWarning', {
+                count: file.translationFailures.length,
+              })
+            : '';
+        const displayWarning = [
+          warningMsg,
+          missedSpeechWarning,
+          translationFailureWarning,
+        ]
           .filter(Boolean)
           .join(' · ');
         const started = stages.some(
@@ -408,6 +491,15 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
+                )}
+                {typeDef?.needsModel && (
+                  <ManuscriptRowBadge
+                    file={file}
+                    formData={formData}
+                    disabled={queueBusy}
+                    manuscriptPool={manuscriptPool}
+                    onAssignManuscript={onAssignManuscript}
+                  />
                 )}
                 {meta && (
                   <span className="hidden md:inline text-[11px] text-muted-foreground whitespace-nowrap flex-shrink-0">

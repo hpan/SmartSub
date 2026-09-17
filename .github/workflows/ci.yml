@@ -39,14 +39,29 @@ jobs:
       - name: Unit tests (AI response parser)
         run: yarn test:translate-parser
 
+      - name: Unit tests (multi-format subtitle output)
+        run: yarn test:subtitle-output
+
       - name: Unit tests (glossary)
         run: yarn test:glossary
 
       - name: Unit tests (structured output fallback)
         run: yarn test:structured-output
 
+      - name: Tests (custom parameter editing and requests)
+        run: yarn test:custom-parameters
+
       - name: Unit tests (translation cancel)
         run: yarn test:translation-cancel
+
+      - name: Integration tests (translation proxy and failure reporting)
+        run: yarn test:translation-proxy
+
+      - name: Integration tests (translation results)
+        run: yarn test:untranslated-flow
+
+      - name: Tests (provider connection test UI flow)
+        run: yarn test:provider-test-flow
 
       - name: Unit tests (free translators)
         run: yarn test:free-translators

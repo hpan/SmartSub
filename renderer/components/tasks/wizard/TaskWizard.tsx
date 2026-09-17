@@ -28,6 +28,7 @@ import {
   Languages,
   Mic2,
   Play,
+  RotateCcw,
   Trash2,
   TriangleAlert,
   Upload,
@@ -67,6 +68,10 @@ import {
   hasUnavailableParakeetModel,
 } from 'lib/engineModels';
 import { canStartParakeetTask } from 'lib/parakeetTask';
+import {
+  validateRefineProviderConfig,
+  getRefineValidationErrorMessage,
+} from 'lib/subtitleRefineValidation';
 import InlineConfigBar from '@/components/tasks/InlineConfigBar';
 import useSystemInfo from 'hooks/useStystemInfo';
 import useLocalFormConfig from 'hooks/useLocalFormConfig';
@@ -77,7 +82,11 @@ import {
   recipeToWizardPrefill,
   WIZARD_DROP_KEY,
 } from 'lib/recipes';
-import { pairMediaWithSubtitlesManual } from 'lib/filePairing';
+import {
+  isManuscriptPath,
+  pairMediaWithManuscriptsManual,
+  pairMediaWithSubtitlesManual,
+} from 'lib/filePairing';
 import {
   STYLE_PRESETS,
   getDefaultStyle,
@@ -156,12 +165,22 @@ export default function TaskWizard() {
   // 媒体+字幕混合（配对模式：同名字幕即源字幕，跳过听写）
   const [files, setFiles] = useState<IFiles[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const manuscriptFiles = useMemo(
+    () => files.filter((f) => isManuscriptPath(f.filePath)),
+    [files],
+  );
   const mediaFiles = useMemo(
-    () => files.filter((f) => !isSubtitleFile(f.filePath)),
+    () =>
+      files.filter(
+        (f) => !isSubtitleFile(f.filePath) && !isManuscriptPath(f.filePath),
+      ),
     [files],
   );
   const subtitleFiles = useMemo(
-    () => files.filter((f) => isSubtitleFile(f.filePath)),
+    () =>
+      files.filter(
+        (f) => isSubtitleFile(f.filePath) && !isManuscriptPath(f.filePath),
+      ),
     [files],
   );
   const inputKind: 'media' | 'subtitle' | 'paired' | null =
@@ -203,6 +222,73 @@ export default function TaskWizard() {
     [subtitleFiles],
   );
 
+  // 手动指派的文稿配对（媒体路径 → 文稿路径 或 '__none__'）
+  const [manualManuscriptPairs, setManualManuscriptPairs] = useState<
+    Map<string, string>
+  >(() => new Map());
+
+  const manuscriptPairing = useMemo(
+    () =>
+      mediaFiles.length > 0 &&
+      (manuscriptFiles.length > 0 || manualManuscriptPairs.size > 0)
+        ? pairMediaWithManuscriptsManual(
+            mediaFiles,
+            manuscriptFiles,
+            manualManuscriptPairs,
+          )
+        : null,
+    [mediaFiles, manuscriptFiles, manualManuscriptPairs],
+  );
+
+  const pairedManuscriptByMediaPath = useMemo(() => {
+    const map = new Map<
+      string,
+      IFiles | { filePath: string; fileName: string }
+    >();
+    manuscriptPairing?.pairs.forEach((p) =>
+      map.set(p.media.filePath, p.manuscript),
+    );
+    return map;
+  }, [manuscriptPairing]);
+
+  const assignManuscript = useCallback(
+    (mediaPath: string, manuscriptPath: string) => {
+      setManualManuscriptPairs((prev) => {
+        const next = new Map(prev);
+        if (!manuscriptPath) {
+          next.delete(mediaPath);
+        } else {
+          next.set(mediaPath, manuscriptPath);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleBrowseManuscript = useCallback(
+    async (mediaPath: string) => {
+      const result = await window?.ipc?.invoke('selectFiles', {
+        type: 'manuscript',
+        multiple: false,
+      });
+      if (!result || result.canceled || !result.filePaths?.length) return;
+      const picked = result.filePaths[0] as string;
+      const wrapped = ((await window?.ipc?.invoke('getDroppedFiles', {
+        files: [picked],
+        taskType: 'manuscript',
+      })) ?? [])[0] as IFiles | undefined;
+      if (!wrapped) return;
+      setFiles((prev) =>
+        prev.some((f) => f.filePath === wrapped.filePath)
+          ? prev
+          : [...prev, wrapped],
+      );
+      assignManuscript(mediaPath, wrapped.filePath);
+    },
+    [assignManuscript],
+  );
+
   /** 删除视频行：合并行语义，连同其配对字幕一起移除（含手动指派记录） */
   const removeMediaRow = useCallback(
     (mediaPath: string) => {
@@ -213,6 +299,12 @@ export default function TaskWizard() {
         ),
       );
       setManualPairs((prev) => {
+        if (!prev.has(mediaPath)) return prev;
+        const next = new Map(prev);
+        next.delete(mediaPath);
+        return next;
+      });
+      setManualManuscriptPairs((prev) => {
         if (!prev.has(mediaPath)) return prev;
         const next = new Map(prev);
         next.delete(mediaPath);
@@ -271,6 +363,54 @@ export default function TaskWizard() {
   const appendFiles = useCallback(
     (incoming: IFiles[]) => {
       if (!incoming?.length) return;
+      const incomingScripts = incoming.filter((f) =>
+        isManuscriptPath(f.filePath),
+      );
+      if (incomingScripts.length > 0) {
+        setFiles((currentFiles) => {
+          const currentMedia = currentFiles.filter(
+            (f) => !isSubtitleFile(f.filePath) && !isManuscriptPath(f.filePath),
+          );
+          const nextMedia = [
+            ...currentMedia,
+            ...incoming.filter(
+              (f) =>
+                !isSubtitleFile(f.filePath) &&
+                !isManuscriptPath(f.filePath) &&
+                !currentMedia.some((m) => m.filePath === f.filePath),
+            ),
+          ];
+          if (nextMedia.length === 1 && incomingScripts.length === 1) {
+            toast.success(
+              t('manuscript.singleMatchedToast', {
+                scriptName: incomingScripts[0].fileName,
+                videoName: nextMedia[0].fileName,
+              }),
+            );
+          } else if (nextMedia.length > 0) {
+            const auto = pairMediaWithManuscriptsManual(
+              nextMedia,
+              incomingScripts,
+            );
+            if (auto.pairs.length > 0) {
+              toast.success(
+                t('manuscript.autoMatchedToast', {
+                  count: auto.pairs.length,
+                }),
+              );
+            }
+            if (auto.unpairedManuscripts.length > 0) {
+              toast.info(
+                t('manuscript.unmatchedToast', {
+                  name: auto.unpairedManuscripts[0].fileName,
+                }),
+              );
+            }
+          }
+          return currentFiles;
+        });
+      }
+
       setFiles((prev) => {
         const seen = new Set(prev.map((f) => f.filePath));
         const fresh: IFiles[] = [];
@@ -317,18 +457,27 @@ export default function TaskWizard() {
         if (p) paths.push(p);
       }
       if (!paths.length) return;
-      // 双类型解析：媒体与字幕各过一遍过滤（含目录展开），混合拖入进配对模式
-      const [droppedMedia, droppedSubtitles] = await Promise.all([
-        window?.ipc?.invoke('getDroppedFiles', {
-          files: paths,
-          taskType: 'media',
-        }),
-        window?.ipc?.invoke('getDroppedFiles', {
-          files: paths,
-          taskType: 'translate',
-        }),
-      ]);
-      const dropped = [...(droppedMedia ?? []), ...(droppedSubtitles ?? [])];
+      // 三类型解析：媒体、字幕与参考文稿各过一遍过滤（含目录展开）
+      const [droppedMedia, droppedSubtitles, droppedManuscripts] =
+        await Promise.all([
+          window?.ipc?.invoke('getDroppedFiles', {
+            files: paths,
+            taskType: 'media',
+          }),
+          window?.ipc?.invoke('getDroppedFiles', {
+            files: paths,
+            taskType: 'translate',
+          }),
+          window?.ipc?.invoke('getDroppedFiles', {
+            files: paths,
+            taskType: 'manuscript',
+          }),
+        ]);
+      const dropped = [
+        ...(droppedMedia ?? []),
+        ...(droppedSubtitles ?? []),
+        ...(droppedManuscripts ?? []),
+      ];
       if (dropped.length) appendFiles(dropped);
     },
     [appendFiles],
@@ -348,6 +497,28 @@ export default function TaskWizard() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 支持 URL 参数直接预填媒体（如工具箱无损视频裁剪/提取后一键「新建任务」：?video=...）
+  useEffect(() => {
+    if (!router.isReady) return;
+    const targetVideo =
+      typeof router.query.video === 'string' ? router.query.video : null;
+    if (targetVideo) {
+      (async () => {
+        try {
+          const droppedMedia = await window?.ipc?.invoke('getDroppedFiles', {
+            files: [targetVideo],
+            taskType: 'media',
+          });
+          if (droppedMedia && droppedMedia.length) {
+            appendFiles(droppedMedia);
+          }
+        } catch (err) {
+          console.error('Failed to import video from query:', err);
+        }
+      })();
+    }
+  }, [router.isReady, router.query.video, appendFiles]);
 
   // 下载页交接来源（?fromDownload=<downloadWorkItemId>）：写入任务快照供回溯
   const sourceDownloadWorkItemId =
@@ -380,6 +551,7 @@ export default function TaskWizard() {
 
   // ── 字幕段配置（本地表单 + InlineConfigBar 复用）─────────────────────────
   const { form, formData, loaded: formLoaded } = useLocalFormConfig();
+  const [refinePopoverOpen, setRefinePopoverOpen] = useState(false);
   const { systemInfo, loaded: systemInfoLoaded } = useSystemInfo();
   const [providers, setProviders] = useState<any[]>([]);
   const [asrProviders, setAsrProviders] = useState<AsrProvider[]>([]);
@@ -738,7 +910,10 @@ export default function TaskWizard() {
         label: t('stage.transcribe'),
         icon: Mic2,
       });
-      if (formData?.manuscriptPath) {
+      const hasAnyManuscript =
+        Boolean(formData?.manuscriptPath) ||
+        pairedManuscriptByMediaPath.size > 0;
+      if (hasAnyManuscript) {
         list.push({
           key: 'manuscript',
           label: t('stage.manuscript'),
@@ -760,10 +935,31 @@ export default function TaskWizard() {
       list.push({ key: 'compose', label: t('stage.compose'), icon: Film });
     }
     return list;
-  }, [inputKind, formData?.manuscriptPath, translateOn, dubOn, videoOn, t]);
+  }, [
+    inputKind,
+    formData?.manuscriptPath,
+    pairedManuscriptByMediaPath,
+    translateOn,
+    dubOn,
+    videoOn,
+    t,
+  ]);
+
+  interface BlockerAction {
+    label: string;
+    onClick: () => void;
+    variant?: 'outline' | 'default' | 'secondary' | 'ghost' | 'link';
+  }
+
+  interface BlockerItem {
+    key: string;
+    text: string;
+    href?: string;
+    actions?: BlockerAction[];
+  }
 
   const blockers = useMemo(() => {
-    const list: Array<{ key: string; text: string; href?: string }> = [];
+    const list: BlockerItem[] = [];
     if (!files.length) {
       list.push({ key: 'files', text: t('wizard.blockNoFiles') });
       return list;
@@ -843,32 +1039,92 @@ export default function TaskWizard() {
       list.push({ key: 'goal', text: t('wizard.blockNoGoal') });
     }
     // AI 字幕精修（openspec: add-ai-subtitle-refine D9 即时校验）：
-    // 开启精修但「跟随翻译服务」不可解析（翻译未开启/非 AI 类型）且未显式指定，
+    // 开启精修但跟随不可解析（翻译未开启/非 AI 类型）且未显式指定，
     // 或显式指定的服务商已失效 → 阻断开始，避免运行时才降级。
-    if (
-      inputKind === 'media' &&
-      (formData?.aiSegmentation === true || formData?.aiCorrection === true)
-    ) {
-      const refineSetting = formData?.refineProvider || 'follow-translation';
-      if (refineSetting === 'follow-translation') {
-        const tp = providers.find(
-          (p: any) => p.id === formData?.translateProvider,
+    if (inputKind === 'media') {
+      const refineValidation = validateRefineProviderConfig({
+        formData,
+        providers,
+        translateOn,
+      });
+
+      if (!refineValidation.valid) {
+        const text = getRefineValidationErrorMessage(
+          refineValidation,
+          t,
+          commonT,
         );
-        if (!translateOn || !tp?.isAi) {
-          list.push({
-            key: 'refine',
-            text: t('wizard.blockRefineFollow'),
+        const actions: BlockerAction[] = [];
+
+        // 快捷操作 A：一键关闭（解除阻断）
+        if (refineValidation.feature === 'both') {
+          actions.push({
+            label: t('wizard.refineActionDisableBoth'),
+            onClick: () => {
+              form.setValue('aiSegmentation', false, { shouldDirty: true });
+              form.setValue('aiCorrection', false, { shouldDirty: true });
+            },
+          });
+        } else if (refineValidation.feature === 'correction') {
+          actions.push({
+            label: t('wizard.refineActionDisableCorrection'),
+            onClick: () => {
+              form.setValue('aiCorrection', false, { shouldDirty: true });
+            },
+          });
+        } else if (refineValidation.feature === 'segmentation') {
+          actions.push({
+            label: t('wizard.refineActionDisableSegmentation'),
+            onClick: () => {
+              form.setValue('aiSegmentation', false, { shouldDirty: true });
+            },
           });
         }
-      } else {
-        const rp = providers.find((p: any) => p.id === refineSetting);
-        if (!rp?.isAi || !isProviderConfigured(rp)) {
-          list.push({
-            key: 'refine',
-            text: t('wizard.blockRefineProviderInvalid'),
-            href: `/${locale}/translation`,
+
+        // 快捷操作 B：一键选用已配置的 AI 服务商（如果存在）
+        const availableAiProviders = providers.filter(
+          (p: any) => p?.isAi && isProviderConfigured(p),
+        );
+        if (availableAiProviders.length > 0) {
+          const candidate =
+            availableAiProviders.find(
+              (p: any) => p.id !== formData?.refineProvider,
+            ) || availableAiProviders[0];
+          const candidateName = commonT(`provider.${candidate.name}`, {
+            defaultValue: candidate.name,
+          });
+          actions.push({
+            label: t('wizard.refineActionUseProvider', {
+              name: candidateName,
+            }),
+            onClick: () => {
+              form.setValue('refineProvider', candidate.id, {
+                shouldDirty: true,
+              });
+            },
           });
         }
+
+        // 快捷操作 C：调整精修配置（唤起弹层并平滑滚动到控件）
+        actions.push({
+          label: t('wizard.refineActionAdjust'),
+          onClick: () => {
+            setRefinePopoverOpen(true);
+            const el = document.getElementById('ai-refine-control-container');
+            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          },
+        });
+
+        list.push({
+          key: 'refine',
+          text,
+          actions,
+          href:
+            refineValidation.reason === 'provider-invalid' ||
+            refineValidation.reason === 'provider-unconfigured'
+              ? `/${locale}/translation`
+              : undefined,
+        });
       }
     }
     return list;
@@ -897,6 +1153,7 @@ export default function TaskWizard() {
     videoOn,
     locale,
     t,
+    form,
   ]);
 
   const canStart = files.length > 0 && blockers.length === 0;
@@ -972,7 +1229,27 @@ export default function TaskWizard() {
               ...p.media,
               providedSubtitlePath: p.subtitle.filePath,
             }))
-          : files;
+          : inputKind === 'subtitle'
+            ? subtitleFiles
+            : mediaFiles.map((m) => {
+                const pairedScript = pairedManuscriptByMediaPath.get(
+                  m.filePath,
+                );
+                const manualVal = manualManuscriptPairs.get(m.filePath);
+                if (manualVal === '__none__') {
+                  return { ...m, manuscriptPath: '__none__' };
+                }
+                if (pairedScript) {
+                  return {
+                    ...m,
+                    manuscriptPath: pairedScript.filePath,
+                    manuscriptName:
+                      pairedScript.fileName ||
+                      pairedScript.filePath.split(/[\\/]/).pop(),
+                  };
+                }
+                return m;
+              });
       if (
         !(await canStartParakeetTask(
           taskFiles,
@@ -1203,15 +1480,166 @@ export default function TaskWizard() {
                             </SelectContent>
                           </Select>
                         )}
-                        <button
-                          type="button"
-                          aria-label={t('wizard.pairBrowse')}
-                          title={t('wizard.pairBrowse')}
-                          className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                          onClick={() => handleBrowseSubtitle(file.filePath)}
-                        >
-                          <Upload className="h-3 w-3" />
-                        </button>
+                        {pairing && (
+                          <button
+                            type="button"
+                            aria-label={t('wizard.pairBrowse')}
+                            title={t('wizard.pairBrowse')}
+                            className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                            onClick={() => handleBrowseSubtitle(file.filePath)}
+                          >
+                            <Upload className="h-3 w-3" />
+                          </button>
+                        )}
+                        {!pairing && inputKind === 'media' && (
+                          <div className="flex items-center gap-1 flex-none">
+                            {pairedManuscriptByMediaPath.get(file.filePath) ? (
+                              <div
+                                className="flex items-center gap-1 rounded border border-primary/30 bg-primary/[0.08] px-1.5 py-0.5 text-[11px] text-primary"
+                                title={
+                                  pairedManuscriptByMediaPath.get(file.filePath)
+                                    ?.filePath
+                                }
+                              >
+                                <FileText className="h-3 w-3 flex-none" />
+                                <span className="max-w-[120px] truncate">
+                                  {t('manuscript.tagSpecific', {
+                                    name:
+                                      'fileName' in
+                                      pairedManuscriptByMediaPath.get(
+                                        file.filePath,
+                                      )!
+                                        ? (
+                                            pairedManuscriptByMediaPath.get(
+                                              file.filePath,
+                                            ) as any
+                                          ).fileName
+                                        : pairedManuscriptByMediaPath
+                                            .get(file.filePath)
+                                            ?.filePath.split(/[\\/]/)
+                                            .pop() || '',
+                                  })}
+                                </span>
+                                <button
+                                  type="button"
+                                  aria-label={t('manuscript.unlinkScript')}
+                                  title={t('manuscript.unlinkScript')}
+                                  className="rounded p-0.5 hover:bg-primary/20"
+                                  onClick={() =>
+                                    assignManuscript(file.filePath, '__none__')
+                                  }
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </div>
+                            ) : manualManuscriptPairs.get(file.filePath) ===
+                              '__none__' ? (
+                              <div className="flex items-center gap-1 rounded border border-border bg-muted/40 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                                <span>{t('manuscript.skipScript')}</span>
+                                <button
+                                  type="button"
+                                  aria-label={t('manuscript.changeScript')}
+                                  title={t('manuscript.changeScript')}
+                                  className="rounded p-0.5 hover:bg-muted"
+                                  onClick={() =>
+                                    assignManuscript(file.filePath, '')
+                                  }
+                                >
+                                  <RotateCcw className="h-3 w-3" />
+                                </button>
+                              </div>
+                            ) : formData?.manuscriptPath ? (
+                              <div
+                                className="flex items-center gap-1 rounded border border-border/60 bg-muted/20 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                                title={formData.manuscriptPath}
+                              >
+                                <FileText className="h-3 w-3 flex-none opacity-60" />
+                                <span className="max-w-[120px] truncate">
+                                  {t('manuscript.tagGlobal', {
+                                    name:
+                                      formData?.manuscriptName ||
+                                      formData.manuscriptPath
+                                        .split(/[\\/]/)
+                                        .pop() ||
+                                      '',
+                                  })}
+                                </span>
+                                <button
+                                  type="button"
+                                  aria-label={t('manuscript.changeScript')}
+                                  title={t('manuscript.changeScript')}
+                                  className="rounded p-0.5 hover:bg-muted"
+                                  onClick={() =>
+                                    handleBrowseManuscript(file.filePath)
+                                  }
+                                >
+                                  <Upload className="h-3 w-3" />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                className="flex items-center gap-1 rounded border border-dashed border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:border-primary/50 hover:text-primary transition-colors"
+                                onClick={() =>
+                                  handleBrowseManuscript(file.filePath)
+                                }
+                                title={t('manuscript.hint')}
+                              >
+                                <FileText className="h-3 w-3" />
+                                {t('manuscript.addScript')}
+                              </button>
+                            )}
+
+                            {manuscriptFiles.length > 0 && (
+                              <Select
+                                value={
+                                  manualManuscriptPairs.get(file.filePath) ===
+                                  '__none__'
+                                    ? '__none__'
+                                    : (pairedManuscriptByMediaPath.get(
+                                        file.filePath,
+                                      )?.filePath ?? '')
+                                }
+                                onValueChange={(v) =>
+                                  assignManuscript(file.filePath, v)
+                                }
+                              >
+                                <SelectTrigger
+                                  className="h-6 w-6 p-0 border-none bg-transparent hover:bg-muted"
+                                  title={t('manuscript.changeScript')}
+                                >
+                                  <ChevronRight className="h-3 w-3 rotate-90 text-muted-foreground" />
+                                </SelectTrigger>
+                                <SelectContent className="max-w-[360px]">
+                                  <SelectItem value="__none__">
+                                    {t('manuscript.skipScript')}
+                                  </SelectItem>
+                                  {formData?.manuscriptPath && (
+                                    <SelectItem value="">
+                                      {t('manuscript.tagGlobal', {
+                                        name:
+                                          formData.manuscriptName ||
+                                          formData.manuscriptPath
+                                            .split(/[\\/]/)
+                                            .pop() ||
+                                          '',
+                                      })}
+                                    </SelectItem>
+                                  )}
+                                  {manuscriptFiles.map((sub) => (
+                                    <SelectItem
+                                      key={sub.filePath}
+                                      value={sub.filePath}
+                                    >
+                                      {sub.fileName}
+                                      {sub.fileExtension}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                        )}
                         <button
                           type="button"
                           aria-label={t('wizard.removeFile')}
@@ -1265,6 +1693,75 @@ export default function TaskWizard() {
                     ),
                   )}
                 </ul>
+              )}
+              {/* 参考文稿行：展示导入的参考文稿池 */}
+              {manuscriptFiles.length > 0 && (
+                <div className="space-y-1 pt-2 border-t border-border/50">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground px-0.5">
+                    <span>
+                      {t('manuscript.label')} ({manuscriptFiles.length})
+                    </span>
+                    {manuscriptPairing &&
+                      manuscriptPairing.unpairedManuscripts.length > 0 && (
+                        <span className="text-warning text-[10px]">
+                          {t('manuscript.unpairedNonBlockingHint')}
+                        </span>
+                      )}
+                  </div>
+                  <ul className="grid gap-1 sm:grid-cols-2">
+                    {manuscriptFiles.map((file) => {
+                      const isMatched = Array.from(
+                        pairedManuscriptByMediaPath.values(),
+                      ).some((m) => m.filePath === file.filePath);
+                      return (
+                        <li
+                          key={file.filePath}
+                          className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-panel-2 px-2.5 py-1 text-xs"
+                        >
+                          <FileText className="h-3.5 w-3.5 flex-none text-primary/70" />
+                          <span
+                            className="min-w-0 flex-1 truncate"
+                            title={file.filePath}
+                          >
+                            {file.fileName}
+                            {file.fileExtension}
+                          </span>
+                          {isMatched ? (
+                            <span className="flex-none rounded-full border border-primary/40 bg-primary/[0.08] px-2 py-0.5 text-[11px] text-primary">
+                              {t('wizard.pairAttached')}
+                            </span>
+                          ) : (
+                            <span className="flex-none rounded-full border border-muted bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+                              {t('wizard.pairUnmatched')}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            aria-label={t('wizard.removeFile')}
+                            className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                            onClick={() => {
+                              setFiles((prev) =>
+                                prev.filter(
+                                  (f) => f.filePath !== file.filePath,
+                                ),
+                              );
+                              setManualManuscriptPairs((prev) => {
+                                const next = new Map(prev);
+                                prev.forEach((sPath, mPath) => {
+                                  if (sPath === file.filePath)
+                                    next.delete(mPath);
+                                });
+                                return next;
+                              });
+                            }}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
               )}
             </div>
           )}
@@ -1321,14 +1818,40 @@ export default function TaskWizard() {
           </span>
           {chips.map((chip, index) => {
             const Icon = chip.icon;
+            const isManuscriptChip = chip.key === 'manuscript';
+            const configuredCount = isManuscriptChip
+              ? mediaFiles.filter((f) => {
+                  const manual = manualManuscriptPairs.get(f.filePath);
+                  if (manual === '__none__') return false;
+                  return Boolean(
+                    pairedManuscriptByMediaPath.get(f.filePath) ||
+                      formData?.manuscriptPath,
+                  );
+                }).length
+              : 0;
+            const chipTitle = isManuscriptChip
+              ? t('manuscript.chainTooltip', {
+                  matched: configuredCount,
+                  total: mediaFiles.length,
+                })
+              : undefined;
+
             return (
               <React.Fragment key={chip.key}>
                 {index > 0 && (
                   <ChevronRight className="h-3 w-3 flex-none text-faint" />
                 )}
-                <span className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/[0.07] px-2 py-0.5 text-[11px] font-medium text-primary">
+                <span
+                  title={chipTitle}
+                  className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/[0.07] px-2 py-0.5 text-[11px] font-medium text-primary"
+                >
                   <Icon className="h-3 w-3" />
                   {chip.label}
+                  {isManuscriptChip && mediaFiles.length > 1 && (
+                    <span className="text-[10px] opacity-80">
+                      ({configuredCount}/{mediaFiles.length})
+                    </span>
+                  )}
                 </span>
               </React.Fragment>
             );
@@ -1354,6 +1877,8 @@ export default function TaskWizard() {
               asrProviders={asrProviders as any}
               typeDef={configTypeDef}
               useLocalWhisper={useLocalWhisper}
+              refineOpen={refinePopoverOpen}
+              onRefineOpenChange={setRefinePopoverOpen}
             />
           </div>
         </Panel>
@@ -1673,12 +2198,14 @@ export default function TaskWizard() {
         <div className="flex flex-wrap items-center gap-3 p-2.5">
           <div className="min-w-0 flex-1 space-y-1">
             {blockers.map((blocker) => (
-              <p
+              <div
                 key={blocker.key}
-                className="flex items-center gap-1.5 text-xs text-warning"
+                className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs text-warning"
               >
-                <TriangleAlert className="h-3.5 w-3.5 flex-none" />
-                {blocker.text}
+                <div className="flex items-center gap-1.5">
+                  <TriangleAlert className="h-3.5 w-3.5 flex-none" />
+                  <span>{blocker.text}</span>
+                </div>
                 {blocker.href && (
                   <Link
                     href={blocker.href}
@@ -1688,7 +2215,19 @@ export default function TaskWizard() {
                     <ArrowRight className="h-3 w-3" />
                   </Link>
                 )}
-              </p>
+                {blocker.actions?.map((act, i) => (
+                  <Button
+                    key={i}
+                    type="button"
+                    variant={act.variant || 'outline'}
+                    size="sm"
+                    className="h-6 px-2 text-[11px] font-normal border-warning/40 text-foreground hover:bg-warning/15 hover:text-warning"
+                    onClick={act.onClick}
+                  >
+                    {act.label}
+                  </Button>
+                ))}
+              </div>
             ))}
             {!blockers.length && files.length > 0 && (
               <p className="text-xs text-muted-foreground">

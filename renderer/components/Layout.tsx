@@ -18,6 +18,7 @@ import {
   AlertCircle,
   AudioLines,
   BookOpenText,
+  Boxes,
   Captions,
   CheckCircle2,
   Clapperboard,
@@ -144,6 +145,12 @@ const NAV_TASK_ITEMS: NavItemDef[] = [
     icon: Mic,
     isActive: (p) => p.includes('/dubbing'),
   },
+  {
+    href: 'toolbox',
+    labelKey: 'nav.toolbox',
+    icon: Boxes,
+    isActive: (p) => p.includes('/toolbox'),
+  },
 ];
 
 /** 配置组：引擎 / 翻译 / 词库 / 声音 */
@@ -209,6 +216,7 @@ const PREFETCH_NAMESPACES = [
   'parameters',
   'modelsControl',
   'download',
+  'toolbox',
 ];
 
 /** 竖排导航项：图标在上、文字在下（P0 导航规范），选中态 = soft 底 + 左缘指示条 */
@@ -217,39 +225,25 @@ function NavItem({
   locale,
   asPath,
   label,
+  hrefOverride,
+  onClick,
 }: {
   item: NavItemDef;
   locale: string;
   asPath: string;
   label: string;
+  hrefOverride?: string;
+  onClick?: (e: React.MouseEvent) => void;
 }) {
   const Icon = item.icon;
   const active = item.isActive(asPath);
-  const router = useRouter();
-
-  // 强制导航：先尝试 router.push，失败则直接设置 location
-  const handleNav = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      e.preventDefault();
-      document.body.style.pointerEvents = '';
-      const targetPath = `/${locale}/${item.href}`;
-      router.push(targetPath).catch(() => {
-        window.location.href = targetPath;
-      });
-    },
-    [locale, item.href, router],
-  );
-
+  const targetHref = hrefOverride ?? item.href;
   return (
-    <div
-      role="link"
-      tabIndex={0}
+    <Link
+      href={`/${locale}/${targetHref}`}
       aria-label={label}
-      onClick={handleNav}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') handleNav(e as any);
-      }}
+      aria-current={active ? 'page' : undefined}
+      onClick={onClick}
       className={cn(
         'titlebar-no-drag relative flex h-12 w-[52px] flex-col items-center justify-center gap-1 rounded-lg transition-colors cursor-pointer',
         active
@@ -259,7 +253,7 @@ function NavItem({
     >
       <Icon className="h-[19px] w-[19px] flex-shrink-0" strokeWidth={1.8} />
       <span className="text-[11px] font-medium leading-none">{label}</span>
-    </div>
+    </Link>
   );
 }
 
@@ -301,6 +295,60 @@ const Layout = ({ children }) => {
   const [showFaq, setShowFaq] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [lastSubtitleSlug, setLastSubtitleSlug] =
+    useState('generate-translate');
+
+  useEffect(() => {
+    const syncFromStorage = () => {
+      try {
+        const saved = localStorage.getItem('lastSubtitleTaskType');
+        if (
+          saved &&
+          ['generate-translate', 'generate', 'translate'].includes(saved)
+        ) {
+          setLastSubtitleSlug(saved);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
+    syncFromStorage();
+
+    const handleCustomChange = (e: CustomEvent<string>) => {
+      if (
+        e.detail &&
+        ['generate-translate', 'generate', 'translate'].includes(e.detail)
+      ) {
+        setLastSubtitleSlug(e.detail);
+      }
+    };
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (
+        e.key === 'lastSubtitleTaskType' &&
+        e.newValue &&
+        ['generate-translate', 'generate', 'translate'].includes(e.newValue)
+      ) {
+        setLastSubtitleSlug(e.newValue);
+      }
+    };
+
+    window.addEventListener(
+      'last-subtitle-task-type-changed',
+      handleCustomChange as EventListener,
+    );
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      window.removeEventListener(
+        'last-subtitle-task-type-changed',
+        handleCustomChange as EventListener,
+      );
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, []);
+
   // SSR / 首屏与静态导出一致：平台相关布局仅在 mount 后写入，避免水合不一致
   const [modKey, setModKey] = useState('⌘');
   const [isMac, setIsMac] = useState(false);
@@ -741,15 +789,29 @@ const Layout = ({ children }) => {
           />
         </Link>
         <nav className="flex flex-col items-center gap-0.5" aria-label="tasks">
-          {NAV_TASK_ITEMS.map((item) => (
-            <NavItem
-              key={item.href}
-              item={item}
-              locale={locale}
-              asPath={asPath}
-              label={t(item.labelKey)}
-            />
-          ))}
+          {NAV_TASK_ITEMS.map((item) => {
+            const isSubtitles = item.labelKey === 'nav.subtitles';
+            const hrefOverride = isSubtitles
+              ? `tasks/${lastSubtitleSlug}`
+              : undefined;
+            const handleClick = (e: React.MouseEvent) => {
+              if (isSubtitles && asPath.includes('/tasks/')) {
+                // 已在任务页内部，点击侧栏「字幕」不强制跳转，保持当前正在查看的任务页
+                e.preventDefault();
+              }
+            };
+            return (
+              <NavItem
+                key={item.href}
+                item={item}
+                locale={locale}
+                asPath={asPath}
+                label={t(item.labelKey)}
+                hrefOverride={hrefOverride}
+                onClick={handleClick}
+              />
+            );
+          })}
         </nav>
         <div className="my-1.5 h-px w-7 bg-border-strong" role="separator" />
         <nav className="flex flex-col items-center gap-0.5" aria-label="config">
@@ -1066,6 +1128,7 @@ const Layout = ({ children }) => {
         open={showCommandPalette}
         onOpenChange={setShowCommandPalette}
         locale={locale}
+        lastSubtitleSlug={lastSubtitleSlug}
         onCheckUpdates={checkUpdatesManually}
         onOpenLogs={() => setShowLogs(true)}
         onOpenShortcuts={() => setShowShortcuts(true)}

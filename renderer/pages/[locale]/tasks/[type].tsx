@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   AlertDialog,
@@ -71,9 +72,14 @@ import CompletionBanner from '@/components/tasks/CompletionBanner';
 import LogPanel from '@/components/tasks/LogPanel';
 import { ProofreadEditor } from '@/components/proofread';
 import { getProofreadUnavailableReason } from '@/components/tasks/stageUtils';
+import {
+  isManuscriptPath,
+  pairMediaWithManuscriptsManual,
+} from '@/lib/filePairing';
 import { getI18nProperties } from '../../../lib/get-static';
 import { IFiles } from '../../../../types';
 import { isPinnedTaskConfigSnapshot } from '../../../../types/taskSnapshot';
+import { getProofreadSourcePath } from '../../../../types/subtitleOutput';
 import { useTranslation } from 'next-i18next';
 import { toast } from 'sonner';
 
@@ -103,6 +109,7 @@ export default function TaskPage() {
   } | null>(null);
   const [taskStatus, setTaskStatus] = useState('idle');
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [refinePopoverOpen, setRefinePopoverOpen] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   /** 固定任务的配置快照（附加阶段/参考文稿）：阶段轨道与横幅按它渲染 */
   const [configSnapshot, setConfigSnapshot] = useState<any>(null);
@@ -116,11 +123,157 @@ export default function TaskPage() {
   /** 来自加载（而非用户/任务事件）的 files 引用，避免回写存储 */
   const loadedFilesRef = useRef<any[] | null>(null);
   const projectIdRef = useRef<string | null>(null);
+  const [manuscriptPool, setManuscriptPool] = useState<IFiles[]>([]);
 
-  // 统一导入入口：按 filePath 去重（对既有列表与本批内部），跳过时提示
+  const handleIncomingMediaAndManuscripts = useCallback(
+    (incomingMedia: IFiles[], incomingManuscripts: IFiles[]) => {
+      const seen = new Set(files.map((f) => f.filePath));
+      const freshMedia: IFiles[] = [];
+      let skipped = 0;
+      for (const file of incomingMedia) {
+        if (file?.filePath && seen.has(file.filePath)) {
+          skipped++;
+          continue;
+        }
+        if (file?.filePath) seen.add(file.filePath);
+        freshMedia.push(file);
+      }
+      if (skipped > 0) {
+        toast.info(t('skippedDuplicates', { count: skipped }));
+      }
+
+      // 维护文稿池：合并已有的 manuscriptPool 与新传入的 incomingManuscripts
+      const poolMap = new Map<string, IFiles>();
+      for (const s of manuscriptPool) {
+        if (s?.filePath) poolMap.set(s.filePath, s);
+      }
+      for (const s of incomingManuscripts || []) {
+        if (s?.filePath) poolMap.set(s.filePath, s);
+      }
+      const currentPool = Array.from(poolMap.values());
+      if (currentPool.length !== manuscriptPool.length) {
+        setManuscriptPool(currentPool);
+      }
+
+      const allMedia = [...files, ...freshMedia];
+
+      // 若当前没有媒体文件（仅导入了文稿）
+      if (allMedia.length === 0) {
+        if (incomingManuscripts && incomingManuscripts.length > 0) {
+          if (incomingManuscripts.length === 1) {
+            toast.info(
+              t('manuscript.poolSingleAddedToast', {
+                defaultValue: t('manuscript.poolAddedToast', {
+                  count: 1,
+                  name: incomingManuscripts[0].fileName,
+                }),
+                name: incomingManuscripts[0].fileName,
+              }),
+            );
+          } else {
+            toast.info(
+              t('manuscript.poolAddedToast', {
+                count: incomingManuscripts.length,
+              }),
+            );
+          }
+        }
+        return;
+      }
+
+      // 若文稿池为空且没有传入新文稿，直接追加媒体
+      if (currentPool.length === 0) {
+        if (freshMedia.length > 0) {
+          setFiles((prev) => [...prev, ...freshMedia]);
+        }
+        return;
+      }
+
+      // 存在媒体和候选文稿池，执行配对
+      const manualPairs = new Map<string, string>();
+      for (const m of allMedia) {
+        if (m.manuscriptPath) {
+          manualPairs.set(m.filePath, m.manuscriptPath);
+        }
+      }
+
+      const pairing = pairMediaWithManuscriptsManual(
+        allMedia,
+        currentPool,
+        manualPairs,
+      );
+
+      const newlyMatched = pairing.pairs.filter(
+        (p) => p.media.manuscriptPath !== p.manuscript.filePath,
+      );
+
+      const matchedByMediaPath = new Map(
+        pairing.pairs.map((p) => [p.media.filePath, p.manuscript]),
+      );
+
+      setFiles((prev) => {
+        const combined = [...prev, ...freshMedia];
+        return combined.map((file) => {
+          const matched = matchedByMediaPath.get(file.filePath);
+          if (matched && file.manuscriptPath !== matched.filePath) {
+            return {
+              ...file,
+              manuscriptPath: matched.filePath,
+              manuscriptName: matched.fileName,
+            };
+          }
+          return file;
+        });
+      });
+
+      if (newlyMatched.length === 1) {
+        toast.success(
+          t('manuscript.singleMatchedToast', {
+            scriptName: newlyMatched[0].manuscript.fileName,
+            videoName: newlyMatched[0].media.fileName,
+          }),
+        );
+      } else if (newlyMatched.length > 1) {
+        toast.success(
+          t('manuscript.autoMatchedToast', {
+            count: newlyMatched.length,
+          }),
+        );
+      }
+
+      // 仅针对本次新增的 incomingManuscripts 中未匹配成功的给出 toast 提示
+      if (incomingManuscripts && incomingManuscripts.length > 0) {
+        const allMatchedPaths = new Set(
+          pairing.pairs.map((p) => p.manuscript.filePath),
+        );
+        const unmatchedFresh = incomingManuscripts.filter(
+          (s) => !allMatchedPaths.has(s.filePath),
+        );
+        for (const s of unmatchedFresh) {
+          toast.info(t('manuscript.unmatchedToast', { name: s.fileName }));
+        }
+      }
+    },
+    [files, manuscriptPool, t],
+  );
+
+  // 统一导入入口：支持文件选择对话框（file-selected）与外部事件传入
   const appendFiles = useCallback(
     (incoming: IFiles[]) => {
       if (!incoming?.length) return;
+
+      // 若当前任务为需要模型的媒体转写类任务，支持自动分离媒体与参考文稿并进行同名配对
+      if (typeDef?.needsModel) {
+        const incomingManuscripts = incoming.filter((f) =>
+          isManuscriptPath(f.filePath),
+        );
+        const incomingMedia = incoming.filter(
+          (f) => !isManuscriptPath(f.filePath),
+        );
+        handleIncomingMediaAndManuscripts(incomingMedia, incomingManuscripts);
+        return;
+      }
+
       const seen = new Set(files.map((f) => f.filePath));
       const fresh: IFiles[] = [];
       let skipped = 0;
@@ -137,7 +290,7 @@ export default function TaskPage() {
         toast.info(t('skippedDuplicates', { count: skipped }));
       }
     },
-    [files, t],
+    [files, typeDef?.needsModel, handleIncomingMediaAndManuscripts, t],
   );
 
   const { hydrateFiles } = useIpcCommunication(setFiles, appendFiles);
@@ -224,6 +377,35 @@ export default function TaskPage() {
       // 经 hydrateFiles 合并装载窗口内暂存的任务事件（向导起跑后立刻跳转时，
       // 秒级阶段事件先于文件加载到达），并以实际写入的数组标记「来自加载」。
       loadedFilesRef.current = hydrateFiles(nextFiles);
+      if (nextFiles && nextFiles.length > 0) {
+        const pool: IFiles[] = [];
+        const seen = new Set<string>();
+        for (const f of nextFiles) {
+          if (
+            f.manuscriptPath &&
+            f.manuscriptPath !== '__none__' &&
+            !seen.has(f.manuscriptPath)
+          ) {
+            seen.add(f.manuscriptPath);
+            pool.push({
+              uuid: uuidv4(),
+              filePath: f.manuscriptPath,
+              fileName:
+                f.manuscriptName ||
+                f.manuscriptPath
+                  .split(/[\\/]/)
+                  .pop()
+                  ?.replace(/\.[^.]+$/, '') ||
+                '',
+              originPath: f.manuscriptPath,
+              ext: f.manuscriptPath.split('.').pop() || '',
+            } as unknown as IFiles);
+          }
+        }
+        setManuscriptPool(pool);
+      } else {
+        setManuscriptPool([]);
+      }
       setProjectName(name);
       setEditingName(false);
       setProjectId(id);
@@ -284,6 +466,26 @@ export default function TaskPage() {
       form.setValue('taskType', typeDef.taskType);
     }
   }, [typeDef, formData, form]);
+
+  // 记录最后访问的标准字幕模式，以便左侧导航栏智能联动
+  useEffect(() => {
+    if (
+      slug &&
+      ['generate-translate', 'generate', 'translate'].includes(slug) &&
+      !configSnapshot
+    ) {
+      try {
+        localStorage.setItem('lastSubtitleTaskType', slug);
+        window.dispatchEvent(
+          new CustomEvent('last-subtitle-task-type-changed', {
+            detail: slug,
+          }),
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [slug, configSnapshot]);
 
   // 带翻译的任务类型不存在「不翻译」：清理历史残留 '-1' 或已被删除的服务商 id
   useEffect(() => {
@@ -478,10 +680,15 @@ export default function TaskPage() {
 
   const handleRetryFailed = handleRetryFiles;
 
-  const handleImport = () => {
-    const fileType = typeDef?.accepts === 'subtitle' ? 'srt' : 'media';
+  const handleImport = useCallback(() => {
+    const fileType =
+      typeDef?.accepts === 'subtitle'
+        ? 'srt'
+        : typeDef?.needsModel
+          ? 'media-and-manuscript'
+          : 'media';
     window?.ipc?.send('openDialog', { dialogType: 'openDialog', fileType });
-  };
+  }, [typeDef]);
 
   // Cmd/Ctrl+O 导入文件（任务页范围）
   useHotkeys([
@@ -497,10 +704,13 @@ export default function TaskPage() {
   const handleClearList = () => {
     if (!files.length || queueBusy) return;
     const prevFiles = files;
+    const prevPool = manuscriptPool;
     setFiles([]);
+    setManuscriptPool([]);
     setBannerDismissed(false);
     confirmOrUndo(t('listCleared'), () => {
       setFiles(prevFiles);
+      setManuscriptPool(prevPool);
     });
   };
 
@@ -533,6 +743,117 @@ export default function TaskPage() {
     if (saved?.name) setProjectName(saved.name);
   };
 
+  // 模式切换确认弹窗与暂存目标
+  const [switchConfirmOpen, setSwitchConfirmOpen] = useState(false);
+  const [pendingTargetSlug, setPendingTargetSlug] = useState<string | null>(
+    null,
+  );
+  const [isSwitchingMode, setIsSwitchingMode] = useState(false);
+  const switchingModeRef = useRef(false);
+
+  const executeModeSwitch = useCallback(
+    async (targetSlug: string, shouldClearFiles: boolean) => {
+      const targetTypeDef = getTaskTypeBySlug(targetSlug);
+      if (!targetTypeDef) return;
+
+      switchingModeRef.current = true;
+      setIsSwitchingMode(true);
+
+      try {
+        try {
+          localStorage.setItem('lastSubtitleTaskType', targetSlug);
+          window.dispatchEvent(
+            new CustomEvent('last-subtitle-task-type-changed', {
+              detail: targetSlug,
+            }),
+          );
+        } catch {
+          /* ignore */
+        }
+
+        if (shouldClearFiles) {
+          if (projectId) {
+            try {
+              await window?.ipc?.invoke('deleteTaskProject', projectId);
+            } catch {
+              /* ignore */
+            }
+          }
+          setFiles([]);
+          setBannerDismissed(false);
+          loadedFilesRef.current = null;
+          projectIdRef.current = null;
+          setProjectId(null);
+          setProjectName(null);
+          form.setValue('taskType', targetTypeDef.taskType);
+          await router.push(`/${locale}/tasks/${targetSlug}`);
+        } else {
+          if (projectId && files.length > 0) {
+            try {
+              const saved = await window?.ipc?.invoke('saveTaskProject', {
+                id: projectId,
+                taskType: targetTypeDef.taskType,
+                files,
+              });
+              if (!saved) {
+                toast.error(t('modeSwitch.saveFailed'));
+                return;
+              }
+            } catch (err) {
+              console.error('Failed to save task project mode:', err);
+              toast.error(t('modeSwitch.saveFailed'));
+              return;
+            }
+          }
+          form.setValue('taskType', targetTypeDef.taskType);
+          const query =
+            projectId && files.length > 0
+              ? `?project=${encodeURIComponent(projectId)}`
+              : '';
+          await router.push(`/${locale}/tasks/${targetSlug}${query}`);
+        }
+      } finally {
+        switchingModeRef.current = false;
+        setIsSwitchingMode(false);
+      }
+    },
+    [locale, projectId, files, form, router, t],
+  );
+
+  const handleModeChange = useCallback(
+    async (targetSlug: string) => {
+      if (targetSlug === slug) return;
+      if (switchingModeRef.current || isSwitchingMode) return;
+      if (queueBusy) {
+        toast.warning(t('modeSwitch.busyHint'));
+        return;
+      }
+      const targetTypeDef = getTaskTypeBySlug(targetSlug);
+      if (!targetTypeDef || !typeDef) return;
+
+      const isCurrentMedia = typeDef.accepts === 'media';
+      const isTargetMedia = targetTypeDef.accepts === 'media';
+
+      // 媒体与字幕不兼容且当前列表中存在文件
+      if (isCurrentMedia !== isTargetMedia && files.length > 0) {
+        setPendingTargetSlug(targetSlug);
+        setSwitchConfirmOpen(true);
+        return;
+      }
+
+      await executeModeSwitch(targetSlug, false);
+    },
+    [
+      slug,
+      isSwitchingMode,
+      queueBusy,
+      typeDef,
+      files.length,
+      t,
+      executeModeSwitch,
+    ],
+  );
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(true);
@@ -543,7 +864,59 @@ export default function TaskPage() {
     setIsDragging(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleAssignManuscript = useCallback(
+    (targetFile: IFiles, manuscriptPath: string, manuscriptName?: string) => {
+      if (manuscriptPath && manuscriptPath !== '__none__') {
+        const name =
+          manuscriptName ||
+          manuscriptPath
+            .split(/[\\/]/)
+            .pop()
+            ?.replace(/\.[^.]+$/, '') ||
+          '';
+        setManuscriptPool((prev) => {
+          if (prev.some((f) => f.filePath === manuscriptPath)) return prev;
+          return [
+            ...prev,
+            {
+              uuid: uuidv4(),
+              filePath: manuscriptPath,
+              fileName: name,
+              originPath: manuscriptPath,
+              ext: manuscriptPath.split('.').pop() || '',
+            } as unknown as IFiles,
+          ];
+        });
+      }
+      setFiles((prev) =>
+        prev.map((f) => {
+          if (f.uuid !== targetFile.uuid) return f;
+          if (!manuscriptPath) {
+            const next = { ...f };
+            delete next.manuscriptPath;
+            delete next.manuscriptName;
+            return next;
+          }
+          return {
+            ...f,
+            manuscriptPath,
+            manuscriptName:
+              manuscriptPath === '__none__'
+                ? ''
+                : manuscriptName ||
+                  manuscriptPath
+                    .split(/[\\/]/)
+                    .pop()
+                    ?.replace(/\.[^.]+$/, '') ||
+                  '',
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     if (!typeDef) return;
@@ -561,14 +934,28 @@ export default function TaskPage() {
     }
 
     if (paths.length > 0) {
-      window?.ipc
-        ?.invoke('getDroppedFiles', {
+      if (typeDef.accepts === 'subtitle') {
+        const dropped = await window?.ipc?.invoke('getDroppedFiles', {
           files: paths,
-          taskType: typeDef.accepts === 'subtitle' ? 'translate' : 'media',
-        })
-        .then((dropped) => {
-          appendFiles(dropped);
+          taskType: 'translate',
         });
+        appendFiles(dropped || []);
+      } else {
+        const [droppedMedia, droppedManuscript] = await Promise.all([
+          window?.ipc?.invoke('getDroppedFiles', {
+            files: paths,
+            taskType: 'media',
+          }),
+          window?.ipc?.invoke('getDroppedFiles', {
+            files: paths,
+            taskType: 'manuscript',
+          }),
+        ]);
+        handleIncomingMediaAndManuscripts(
+          droppedMedia || [],
+          droppedManuscript || [],
+        );
+      }
     }
   };
 
@@ -583,8 +970,7 @@ export default function TaskPage() {
       : proofreadFile.filePath;
 
     const sourceSubtitlePath =
-      proofreadFile.srtFile ||
-      proofreadFile.tempSrtFile ||
+      getProofreadSourcePath(proofreadFile) ||
       (isSubtitleFile(proofreadFile.filePath)
         ? proofreadFile.filePath
         : path.join(proofreadFile.directory, `${proofreadFile.fileName}.srt`));
@@ -687,12 +1073,44 @@ export default function TaskPage() {
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-          <h1
-            className="shrink-0 truncate text-lg font-semibold"
-            title={pageTitle}
-          >
-            {pageTitle}
-          </h1>
+          {configSnapshot ? (
+            <h1
+              className="shrink-0 truncate text-lg font-semibold"
+              title={pageTitle}
+            >
+              {pageTitle}
+            </h1>
+          ) : (
+            <Tabs
+              value={slug}
+              onValueChange={handleModeChange}
+              className="shrink-0"
+            >
+              <TabsList className="h-8">
+                <TabsTrigger
+                  value="generate-translate"
+                  disabled={queueBusy || isSwitchingMode}
+                  className="h-7 text-xs px-2.5 sm:px-3"
+                >
+                  {t('pageTitle.generate-translate')}
+                </TabsTrigger>
+                <TabsTrigger
+                  value="generate"
+                  disabled={queueBusy || isSwitchingMode}
+                  className="h-7 text-xs px-2.5 sm:px-3"
+                >
+                  {t('pageTitle.generate')}
+                </TabsTrigger>
+                <TabsTrigger
+                  value="translate"
+                  disabled={queueBusy || isSwitchingMode}
+                  className="h-7 text-xs px-2.5 sm:px-3"
+                >
+                  {t('pageTitle.translate')}
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
           {editingName ? (
             <div className="flex items-center gap-1 min-w-0">
               <Input
@@ -736,7 +1154,7 @@ export default function TaskPage() {
               </Button>
             </div>
           ) : (
-            <span className="text-xs text-muted-foreground whitespace-nowrap">
+            <span className="text-xs text-muted-foreground whitespace-nowrap truncate">
               {t('newTaskHint')}
             </span>
           )}
@@ -814,6 +1232,8 @@ export default function TaskPage() {
             asrProviders={asrProviders as any}
             typeDef={typeDef}
             useLocalWhisper={useLocalWhisper}
+            refineOpen={refinePopoverOpen}
+            onRefineOpenChange={setRefinePopoverOpen}
           />
         )}
       </div>
@@ -917,6 +1337,7 @@ export default function TaskPage() {
               typeDef={typeDef}
               formData={listFormData}
               taskStatus={taskStatus}
+              manuscriptPool={manuscriptPool}
               onProofread={handleProofread}
               onDelete={(uuid) =>
                 setFiles((prev) => prev.filter((f) => f.uuid !== uuid))
@@ -926,6 +1347,8 @@ export default function TaskPage() {
                 handleReleaseGate(gate, [file.uuid])
               }
               onInspectDubbing={handleInspectDubbing}
+              onAssignManuscript={handleAssignManuscript}
+              onImport={handleImport}
             />
           ) : (
             <TaskRowList
@@ -933,6 +1356,7 @@ export default function TaskPage() {
               typeDef={typeDef}
               formData={listFormData}
               taskStatus={taskStatus}
+              manuscriptPool={manuscriptPool}
               onProofread={handleProofread}
               onDelete={(uuid) =>
                 setFiles((prev) => prev.filter((f) => f.uuid !== uuid))
@@ -942,6 +1366,8 @@ export default function TaskPage() {
                 handleReleaseGate(gate, [file.uuid])
               }
               onInspectDubbing={handleInspectDubbing}
+              onAssignManuscript={handleAssignManuscript}
+              onImport={handleImport}
             />
           )}
         </ScrollArea>
@@ -954,6 +1380,12 @@ export default function TaskPage() {
             files={files}
             typeDef={typeDef}
             projectId={projectId}
+            providers={providers}
+            onOpenRefine={() => {
+              setRefinePopoverOpen(true);
+              const el = document.getElementById('ai-refine-control-container');
+              el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }}
             onStatusChange={handleStatusChange}
             onTaskDispatched={handleTaskDispatched}
             autoStart={autoStartPending}
@@ -999,6 +1431,39 @@ export default function TaskPage() {
               }}
             >
               {t('gate.releaseAllConfirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 模式切换确认弹窗（媒体与字幕不兼容时） */}
+      <AlertDialog
+        open={switchConfirmOpen}
+        onOpenChange={(open) => {
+          setSwitchConfirmOpen(open);
+          if (!open) setPendingTargetSlug(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('modeSwitch.confirmTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('modeSwitch.incompatibleDesc')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPendingTargetSlug(null)}>
+              {t('modeSwitch.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingTargetSlug) {
+                  executeModeSwitch(pendingTargetSlug, true);
+                  setPendingTargetSlug(null);
+                }
+              }}
+            >
+              {t('modeSwitch.confirm')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

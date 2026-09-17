@@ -27,6 +27,8 @@ import {
   CONFIG_TEMPLATES,
   defaultUserPrompt,
   defaultSystemPrompt,
+  DEFAULT_AI_BATCH_SIZE,
+  DEFAULT_AI_BATCH_CONCURRENCY,
   STRUCTURED_OUTPUT_MODES,
   StructuredOutputMode,
   cloneProviderForFallback,
@@ -170,9 +172,14 @@ function isDetectSkippableError(error: unknown): boolean {
     'insufficient',
     'enotfound',
     'econnrefused',
+    'econnreset',
     'eai_again',
     'etimedout',
     'timeout',
+    'timed out',
+    'connection error',
+    'network error',
+    'socket hang up',
     'fetch failed',
     '配置不完整',
   ].some((keyword) => raw.includes(keyword));
@@ -461,8 +468,8 @@ const ProvidersTab: React.FC = () => {
       isAi: true,
       prompt: defaultUserPrompt,
       useBatchTranslation: false,
-      batchSize: 10,
-      batchConcurrency: 1,
+      batchSize: DEFAULT_AI_BATCH_SIZE,
+      batchConcurrency: DEFAULT_AI_BATCH_CONCURRENCY,
       systemPrompt: defaultSystemPrompt,
       structuredOutput: 'json_object',
     };
@@ -629,7 +636,11 @@ const ProvidersTab: React.FC = () => {
               }),
             );
             return;
-          } catch {
+          } catch (retryError) {
+            if (isDetectSkippableError(retryError)) {
+              error = retryError;
+              break;
+            }
             // 该模式也不行，继续下一个
           }
         }

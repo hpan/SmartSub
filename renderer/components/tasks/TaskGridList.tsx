@@ -44,18 +44,31 @@ import {
   formatMediaDuration,
 } from './stageUtils';
 import { RailChips } from './TaskRowList';
-import { SPEAKER_DIARIZATION_METADATA_SAVE_FAILED } from '../../../types/speakerDiarization';
+import { ManuscriptRowBadge } from './ManuscriptRowBadge';
+import {
+  SPEAKER_DIARIZATION_METADATA_SAVE_FAILED,
+  TRANSLATION_INCOMPLETE_PIPELINE_PAUSED,
+  TRANSLATION_INCOMPLETE_FOR_DUBBING,
+  TRANSLATION_INCOMPLETE_FOR_COMPOSE,
+} from '../../../types';
 
 interface TaskGridListProps {
   files: any[];
   typeDef: TaskTypeDef;
   formData: any;
   taskStatus: string;
+  manuscriptPool?: any[];
   onProofread: (file: any) => void;
   onDelete: (uuid: string) => void;
   onRetry: (file: any) => void;
   onReleaseGate?: (file: any, gate: 'subtitle' | 'dubbing') => void;
   onInspectDubbing?: (file: any) => void;
+  onAssignManuscript?: (
+    file: any,
+    manuscriptPath: string,
+    manuscriptName?: string,
+  ) => void;
+  onImport?: () => void;
 }
 
 // 仅在卡片进入视口时挂载 <video>，限制同时存在的解码器数量
@@ -136,11 +149,14 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
   typeDef,
   formData,
   taskStatus,
+  manuscriptPool,
   onProofread,
   onDelete,
   onRetry,
   onReleaseGate,
   onInspectDubbing,
+  onAssignManuscript,
+  onImport,
 }) => {
   const { t } = useTranslation('tasks');
   const queueBusy =
@@ -149,7 +165,16 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
     taskStatus === 'cancelling';
 
   const handleImport = () => {
-    const fileType = typeDef.accepts === 'subtitle' ? 'srt' : 'media';
+    if (onImport) {
+      onImport();
+      return;
+    }
+    const fileType =
+      typeDef.accepts === 'subtitle'
+        ? 'srt'
+        : typeDef.needsModel
+          ? 'media-and-manuscript'
+          : 'media';
     window?.ipc?.send('openDialog', { dialogType: 'openDialog', fileType });
   };
 
@@ -163,6 +188,7 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
   if (!files.length) {
     // 空态：统一三步引导（与列表视图 TaskRowList 同形态）
     const subtitleInput = typeDef.accepts === 'subtitle';
+    const canAcceptManuscript = !subtitleInput && Boolean(typeDef.needsModel);
     return (
       <div
         className="h-[380px] cursor-pointer rounded-lg border-2 border-dashed border-border-strong transition-colors hover:border-primary/50"
@@ -175,7 +201,9 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
               title: t('empty.step1'),
               desc: subtitleInput
                 ? t('empty.subtitleFormats')
-                : t('empty.mediaFormats'),
+                : canAcceptManuscript
+                  ? t('empty.mediaAndManuscriptFormats')
+                  : t('empty.mediaFormats'),
             },
             {
               icon: Settings2,
@@ -189,18 +217,34 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
             },
           ]}
           actions={
-            <Button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleImport();
-              }}
-            >
-              <FileUp className="h-4 w-4" />
-              {t('import')}
-            </Button>
+            <div className="flex flex-col items-center gap-2">
+              {Boolean(canAcceptManuscript && manuscriptPool?.length) && (
+                <div className="flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>
+                    {t('manuscript.emptyWaitingVideos', {
+                      count: manuscriptPool!.length,
+                    })}
+                  </span>
+                </div>
+              )}
+              <Button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleImport();
+                }}
+              >
+                <FileUp className="h-4 w-4" />
+                {t('import')}
+              </Button>
+            </div>
           }
           dropHint={
-            subtitleInput ? t('empty.dragSubtitle') : t('empty.dragMedia')
+            subtitleInput
+              ? t('empty.dragSubtitle')
+              : canAcceptManuscript
+                ? t('empty.dragMediaAndManuscript')
+                : t('empty.dragMedia')
           }
         />
       </div>
@@ -217,7 +261,17 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
         const failed = hasFileError(file, stages);
         const rawError = failed ? getFileError(file, stages) : '';
         const errorMsg =
-          rawError === 'TASK_INTERRUPTED' ? t('interrupted') : rawError;
+          rawError === 'TASK_INTERRUPTED'
+            ? t('interrupted')
+            : rawError === TRANSLATION_INCOMPLETE_PIPELINE_PAUSED
+              ? t('row.translationIncompletePipelinePaused', {
+                  count: file?.translationFailures?.length || 0,
+                })
+              : rawError === TRANSLATION_INCOMPLETE_FOR_DUBBING
+                ? t('row.translationIncompleteForDubbing')
+                : rawError === TRANSLATION_INCOMPLETE_FOR_COMPOSE
+                  ? t('row.translationIncompleteForCompose')
+                  : rawError;
         const rawWarning = getFileWarning(file, stages);
         const warningMsg =
           rawWarning === SPEAKER_DIARIZATION_METADATA_SAVE_FAILED
@@ -231,7 +285,17 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
               ),
             })
           : '';
-        const displayWarning = [warningMsg, missedSpeechWarning]
+        const translationFailureWarning =
+          !failed && file?.translationFailures?.length
+            ? t('row.translationFailureWarning', {
+                count: file.translationFailures.length,
+              })
+            : '';
+        const displayWarning = [
+          warningMsg,
+          missedSpeechWarning,
+          translationFailureWarning,
+        ]
           .filter(Boolean)
           .join(' · ');
         const started = stages.some(
@@ -261,7 +325,7 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
             className={cn(
               'group relative flex flex-col gap-2 rounded-lg border p-2 transition-colors hover:bg-muted/40',
               failed && 'border-destructive/30',
-              !failed && warningMsg && 'border-warning/30',
+              !failed && displayWarning && 'border-warning/30',
             )}
           >
             <div className="relative">
@@ -307,6 +371,19 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
 
             {meta && (
               <span className="text-[11px] text-muted-foreground">{meta}</span>
+            )}
+
+            {typeDef?.needsModel && (
+              <div className="flex items-center min-w-0">
+                <ManuscriptRowBadge
+                  file={file}
+                  formData={formData}
+                  disabled={queueBusy}
+                  compact
+                  manuscriptPool={manuscriptPool}
+                  onAssignManuscript={onAssignManuscript}
+                />
+              </div>
             )}
 
             <RailChips file={file} rail={rail} t={t} className="flex-wrap" />
