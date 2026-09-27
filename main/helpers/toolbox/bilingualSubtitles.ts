@@ -6,6 +6,11 @@
  */
 
 import fs from 'fs';
+import {
+  reserveToolboxOutput,
+  toolboxOutputDirectory,
+  writeToolboxOutput,
+} from './outputPath';
 import path from 'path';
 import { decodeBufferToString, encodeStringToBuffer } from './encodingDetector';
 import {
@@ -57,12 +62,12 @@ export async function mergeBilingualSubtitles(
     const pCues = parseSubtitleCues(pDecoded.text, pFormat);
     const sCues = parseSubtitleCues(sDecoded.text, sFormat);
 
-    if (pCues.length === 0) {
+    if (pCues.length === 0 || sCues.length === 0) {
       return {
         success: false,
         outputPaths: [],
         cuesCount: 0,
-        error: 'Primary subtitle file contains no cues',
+        error: 'One or both subtitle files contain no cues',
       };
     }
 
@@ -107,18 +112,17 @@ export async function mergeBilingualSubtitles(
     const ext = path.extname(primaryPath) || '.srt';
     const baseName = path.basename(primaryPath, ext);
 
-    const targetOutput =
+    const desiredOutput =
       outputPath || path.join(dir, `${baseName}_bilingual${ext}`);
-    const format = detectSubtitleFormatFromContent(targetOutput, '');
+    const format = detectSubtitleFormatFromContent(desiredOutput, '');
     const outContent = serializeSubtitleCues(
       mergedCues,
       format as SubtitleFormat,
     );
 
-    await fs.promises.writeFile(
-      targetOutput,
-      encodeStringToBuffer(outContent, 'utf-8'),
-    );
+    const encoded = encodeStringToBuffer(outContent, 'utf-8');
+    const targetOutput = reserveToolboxOutput(desiredOutput);
+    await writeToolboxOutput(targetOutput, encoded);
 
     return {
       success: true,
@@ -178,25 +182,39 @@ export async function splitBilingualSubtitles(
       }
     }
 
-    const dir =
-      outputDir && fs.existsSync(outputDir)
-        ? outputDir
-        : path.dirname(filePath);
+    const dir = toolboxOutputDirectory(outputDir, filePath);
     const ext = path.extname(filePath) || '.srt';
     const baseName = path.basename(filePath, ext);
 
-    const out1 = path.join(dir, `${baseName}_part1${ext}`);
-    const out2 = path.join(dir, `${baseName}_part2${ext}`);
+    const content1 = encodeStringToBuffer(
+      serializeSubtitleCues(part1Cues, format as SubtitleFormat),
+      'utf-8',
+    );
+    const content2 = encodeStringToBuffer(
+      serializeSubtitleCues(part2Cues, format as SubtitleFormat),
+      'utf-8',
+    );
 
-    const content1 = serializeSubtitleCues(part1Cues, format as SubtitleFormat);
-    const content2 = serializeSubtitleCues(part2Cues, format as SubtitleFormat);
-
-    await fs.promises.writeFile(out1, encodeStringToBuffer(content1, 'utf-8'));
-    await fs.promises.writeFile(out2, encodeStringToBuffer(content2, 'utf-8'));
+    const outputs: string[] = [];
+    try {
+      outputs.push(
+        reserveToolboxOutput(path.join(dir, `${baseName}_part1${ext}`)),
+      );
+      outputs.push(
+        reserveToolboxOutput(path.join(dir, `${baseName}_part2${ext}`)),
+      );
+      await writeToolboxOutput(outputs[0], content1);
+      await writeToolboxOutput(outputs[1], content2);
+    } catch (error) {
+      await Promise.all(
+        outputs.map((output) => fs.promises.unlink(output).catch(() => {})),
+      );
+      throw error;
+    }
 
     return {
       success: true,
-      outputPaths: [out1, out2],
+      outputPaths: outputs,
       cuesCount: cues.length,
     };
   } catch (err: any) {

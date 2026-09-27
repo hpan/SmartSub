@@ -6,6 +6,7 @@
  */
 
 import fs from 'fs';
+import { reserveToolboxOutput } from './outputPath';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import ffmpegStatic from 'ffmpeg-static';
@@ -73,7 +74,9 @@ export function executeVideoToGif(
     const dir = outputPath ? path.dirname(outputPath) : path.dirname(videoPath);
     const baseName = path.basename(videoPath, path.extname(videoPath));
 
-    const targetOutput = outputPath || path.join(dir, `${baseName}_clip.gif`);
+    const targetOutput = reserveToolboxOutput(
+      outputPath || path.join(dir, `${baseName}_clip.gif`),
+    );
 
     const duration = Math.max(0.1, endSec - startSec);
     const startStr = formatFfmpegTime(startSec);
@@ -152,6 +155,9 @@ export function executeVideoToGif(
 
     proc.on('error', (err) => {
       activeGifProcesses.delete(jobId);
+      try {
+        fs.unlinkSync(targetOutput);
+      } catch {}
       reject(err);
     });
   });

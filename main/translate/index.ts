@@ -19,6 +19,7 @@ import { logMessage, store } from '../helpers/storeManager';
 import { IFiles, IFormData } from '../../types';
 import { ensureTempDir } from '../helpers/fileUtils';
 import { isTaskCancelledError } from '../helpers/taskContext';
+import type { ActivityObserver } from '../../types/taskActivity';
 import { assertValidTestTranslation } from './utils/error';
 import { sanitizeFallbackReason } from './services/providerFallback';
 import {
@@ -44,6 +45,7 @@ export default async function translate(
   onProgress?: (progress: number) => void,
   maxRetries?: number,
   fallbackProviders?: Provider[],
+  onActivity?: ActivityObserver,
 ): Promise<boolean> {
   const {
     translateContent,
@@ -219,6 +221,8 @@ export default async function translate(
             : `翻译服务「${fallback.from.name}」暂时不可用，已切换到「${fallback.to.name}」继续翻译`,
         );
       },
+      formData.subtitleTranslationStyle,
+      onActivity,
     );
 
     logMessage('Translation completed', 'info');

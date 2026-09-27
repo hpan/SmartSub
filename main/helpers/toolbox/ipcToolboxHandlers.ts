@@ -1,11 +1,14 @@
+import { ipcMain } from '../../automation/handlers';
+import { dialogWindow } from '../../automation/events';
 /**
  * 工具箱 IPC 统一处理函数
  *
  * 注册 toolbox:* 命名空间，提供文件对话框、转码调度、进度推送及任务取消能力。
  */
 
-import { ipcMain, dialog, BrowserWindow, shell } from 'electron';
+import { dialog, BrowserWindow, shell } from 'electron';
 import fs from 'fs';
+import { trackToolOperation } from '../processingHistory';
 import path from 'path';
 import { logMessage } from '../logger';
 import {
@@ -28,6 +31,8 @@ import {
 import {
   scanEmbeddedSubtitles,
   extractEmbeddedSubtitles,
+  cancelEmbeddedSubtitleExtraction,
+  cancelAllEmbeddedSubtitleExtractions,
 } from './embeddedSubtitleExtractor';
 import { executeSubtitleSync } from './subtitleSync';
 import {
@@ -106,7 +111,7 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
       }
 
       const res = await dialog.showOpenDialog(
-        mainWindow || (undefined as any),
+        dialogWindow(mainWindow) || (undefined as any),
         {
           properties,
           filters,
@@ -120,9 +125,12 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
 
   // 2. 选择目录
   ipcMain.handle('toolbox:selectFolder', async () => {
-    const res = await dialog.showOpenDialog(mainWindow || (undefined as any), {
-      properties: ['openDirectory', 'createDirectory'],
-    });
+    const res = await dialog.showOpenDialog(
+      dialogWindow(mainWindow) || (undefined as any),
+      {
+        properties: ['openDirectory', 'createDirectory'],
+      },
+    );
     if (res.canceled) return null;
     return res.filePaths[0] || null;
   });
@@ -187,14 +195,24 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
           error: `File not found: ${config?.filePath}`,
         };
       }
-      return convertSubtitleFile(config);
+      return trackToolOperation(
+        'subtitle-converter',
+        [config.filePath],
+        { ...config },
+        () => convertSubtitleFile(config),
+      );
     },
   );
 
   ipcMain.handle(
     'toolbox:batchConvertSubtitles',
     async (_event, configs: SubtitleConvertItemConfig[]) => {
-      return batchConvertSubtitles(configs || []);
+      return trackToolOperation(
+        'subtitle-converter',
+        (configs || []).map((config) => config.filePath),
+        { configs },
+        () => batchConvertSubtitles(configs || []),
+      );
     },
   );
 
@@ -219,12 +237,18 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
           error: `Video file not found: ${config?.videoPath}`,
         };
       }
-      return executeVideoTrim(config, jobId, (progress) => {
-        mainWindow?.webContents.send('toolbox:trimProgress', {
-          jobId,
-          ...progress,
-        });
-      });
+      return trackToolOperation(
+        'video-trimmer',
+        [config.videoPath],
+        { ...config },
+        () =>
+          executeVideoTrim(config, jobId, (progress) => {
+            mainWindow?.webContents.send('toolbox:trimProgress', {
+              jobId,
+              ...progress,
+            });
+          }),
+      );
     },
   );
 
@@ -246,12 +270,18 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
           error: `Video file not found: ${config?.videoPath}`,
         };
       }
-      return executeAudioExtract(config, jobId, (percent) => {
-        mainWindow?.webContents.send('toolbox:audioProgress', {
-          jobId,
-          percent,
-        });
-      });
+      return trackToolOperation(
+        'audio-extractor',
+        [config.videoPath],
+        { ...config },
+        () =>
+          executeAudioExtract(config, jobId, (percent) => {
+            mainWindow?.webContents.send('toolbox:audioProgress', {
+              jobId,
+              percent,
+            });
+          }),
+      );
     },
   );
 
@@ -275,7 +305,7 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
 
   ipcMain.handle(
     'toolbox:extractEmbeddedSubtitles',
-    async (_event, config: ExtractEmbeddedSubtitleConfig) => {
+    async (event, config: ExtractEmbeddedSubtitleConfig, jobId?: string) => {
       if (!config?.videoPath || !fs.existsSync(config.videoPath)) {
         return {
           success: false,
@@ -283,15 +313,36 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
           error: `Video file not found: ${config?.videoPath}`,
         };
       }
-      return extractEmbeddedSubtitles(config);
+      return trackToolOperation(
+        'embedded-subtitles',
+        [config.videoPath],
+        { ...config },
+        () =>
+          extractEmbeddedSubtitles(config, jobId, (percent) => {
+            if (!event.sender.isDestroyed())
+              event.sender.send('toolbox:embeddedSubtitleProgress', {
+                jobId,
+                percent,
+              });
+          }),
+      );
     },
+  );
+
+  ipcMain.handle('toolbox:cancelEmbeddedSubtitles', (_event, jobId: string) =>
+    cancelEmbeddedSubtitleExtraction(jobId),
   );
 
   // 8. 字幕时间轴校准
   ipcMain.handle(
     'toolbox:syncSubtitleTime',
     async (_event, config: SubtitleSyncConfig) => {
-      return executeSubtitleSync(config);
+      return trackToolOperation(
+        'subtitle-sync',
+        [config.filePath],
+        { ...config },
+        () => executeSubtitleSync(config),
+      );
     },
   );
 
@@ -299,14 +350,24 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
   ipcMain.handle(
     'toolbox:mergeBilingualSubtitles',
     async (_event, config: BilingualSubtitleMergeConfig) => {
-      return mergeBilingualSubtitles(config);
+      return trackToolOperation(
+        'bilingual-subtitles',
+        [config.primaryPath, config.secondaryPath],
+        { ...config },
+        () => mergeBilingualSubtitles(config),
+      );
     },
   );
 
   ipcMain.handle(
     'toolbox:splitBilingualSubtitles',
     async (_event, config: BilingualSubtitleSplitConfig) => {
-      return splitBilingualSubtitles(config);
+      return trackToolOperation(
+        'bilingual-subtitles',
+        [config.filePath],
+        { ...config },
+        () => splitBilingualSubtitles(config),
+      );
     },
   );
 
@@ -315,12 +376,18 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
     'toolbox:compressVideo',
     async (_event, payload: { config: VideoCompressConfig; jobId: string }) => {
       const { config, jobId } = payload;
-      return executeVideoCompress(config, jobId, (percent) => {
-        mainWindow?.webContents.send('toolbox:compressProgress', {
-          jobId,
-          percent,
-        });
-      });
+      return trackToolOperation(
+        'video-compressor',
+        [config.videoPath],
+        { ...config },
+        () =>
+          executeVideoCompress(config, jobId, (percent) => {
+            mainWindow?.webContents.send('toolbox:compressProgress', {
+              jobId,
+              percent,
+            });
+          }),
+      );
     },
   );
 
@@ -336,12 +403,18 @@ export function setupToolboxHandlers(mainWindow?: BrowserWindow | null): void {
     'toolbox:videoToGif',
     async (_event, payload: { config: VideoToGifConfig; jobId: string }) => {
       const { config, jobId } = payload;
-      return executeVideoToGif(config, jobId, (percent) => {
-        mainWindow?.webContents.send('toolbox:gifProgress', {
-          jobId,
-          percent,
-        });
-      });
+      return trackToolOperation(
+        'video-to-gif',
+        [config.videoPath],
+        { ...config },
+        () =>
+          executeVideoToGif(config, jobId, (percent) => {
+            mainWindow?.webContents.send('toolbox:gifProgress', {
+              jobId,
+              percent,
+            });
+          }),
+      );
     },
   );
 
@@ -361,6 +434,7 @@ export function shutdownToolboxProcesses(): void {
     cancelAllAudioProcesses();
     cancelAllCompressProcesses();
     cancelAllGifProcesses();
+    cancelAllEmbeddedSubtitleExtractions();
     logMessage(
       'All active toolbox processes have been shut down cleanly',
       'info',

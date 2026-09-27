@@ -1,3 +1,4 @@
+import { TaskActivityDetails } from './TaskActivityDetails';
 import React, { useRef } from 'react';
 import {
   AudioLines,
@@ -32,6 +33,7 @@ import {
   getFileStages,
   getFileRail,
   getStageStatus,
+  getTaskDisplayStatus,
   getGateStatus,
   getDockedGate,
   getFilePercent,
@@ -46,13 +48,9 @@ import {
   type RailItem,
   type StageDef,
 } from './stageUtils';
-import {
-  SPEAKER_DIARIZATION_METADATA_SAVE_FAILED,
-  TRANSLATION_INCOMPLETE_PIPELINE_PAUSED,
-  TRANSLATION_INCOMPLETE_FOR_DUBBING,
-  TRANSLATION_INCOMPLETE_FOR_COMPOSE,
-} from '../../../types';
+import { formatTaskMessage } from './taskMessages';
 import { ManuscriptRowBadge } from './ManuscriptRowBadge';
+import { SpeechReviewBadge } from './SpeechReviewBadge';
 
 interface TaskRowListProps {
   files: any[];
@@ -161,6 +159,7 @@ export function RailChips({
               count: translationFailureCount,
             })
           : undefined;
+        const stageWarning = Boolean(file?.[`${stage.key}Error`]);
         return (
           <React.Fragment key={stage.key}>
             {index > 0 && <ChevronRight className="h-3 w-3 text-faint" />}
@@ -170,7 +169,7 @@ export function RailChips({
                 status === 'pending' && 'text-faint',
                 status === 'loading' && 'text-primary font-medium',
                 status === 'done' &&
-                  (manuscriptWarning ? 'text-warning' : 'text-success'),
+                  (stageWarning ? 'text-warning' : 'text-success'),
                 status === 'error' && 'text-destructive font-medium',
               )}
               title={
@@ -185,13 +184,20 @@ export function RailChips({
                 <Loader2 className="h-3 w-3 animate-spin" />
               )}
               {status === 'done' &&
-                (manuscriptWarning ? (
+                (stageWarning ? (
                   <CircleAlert className="h-3 w-3" />
                 ) : (
                   <CheckCircle2 className="h-3 w-3" />
                 ))}
               {status === 'error' && <CircleAlert className="h-3 w-3" />}
-              {t(stage.labelKey)}
+              {stage.key === 'extractSubtitle' &&
+              status === 'loading' &&
+              file.speechReviewStage
+                ? t('row.speechReviewing')
+                : t(stage.labelKey)}
+              {stage.key === 'extractSubtitle' && status === 'done' ? (
+                <SpeechReviewBadge file={file} />
+              ) : null}
               {status === 'done' && manuscriptSummary && (
                 <span className="text-[10px]">
                   {manuscriptSummary.replacedCues}/{manuscriptSummary.totalCues}
@@ -379,26 +385,25 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
         const stages = getFileStages(file, typeDef, formData);
         const rail = getFileRail(file, typeDef, formData);
         const dockedGate = getDockedGate(file, formData);
+        const status = getTaskDisplayStatus(
+          file,
+          stages,
+          taskStatus,
+          dockedGate,
+        );
         const percent = getFilePercent(file, stages);
         const failed = hasFileError(file, stages);
         const rawError = failed ? getFileError(file, stages) : '';
-        const errorMsg =
-          rawError === 'TASK_INTERRUPTED'
-            ? t('interrupted')
-            : rawError === TRANSLATION_INCOMPLETE_PIPELINE_PAUSED
-              ? t('row.translationIncompletePipelinePaused', {
-                  count: file?.translationFailures?.length || 0,
-                })
-              : rawError === TRANSLATION_INCOMPLETE_FOR_DUBBING
-                ? t('row.translationIncompleteForDubbing')
-                : rawError === TRANSLATION_INCOMPLETE_FOR_COMPOSE
-                  ? t('row.translationIncompleteForCompose')
-                  : rawError;
-        const rawWarning = getFileWarning(file, stages);
-        const warningMsg =
-          rawWarning === SPEAKER_DIARIZATION_METADATA_SAVE_FAILED
-            ? t('row.speakerDiarizationMetadataSaveFailed')
-            : rawWarning;
+        const errorMsg = formatTaskMessage(
+          rawError,
+          t,
+          file?.translationFailures?.length || 0,
+        );
+        const warningMsg = formatTaskMessage(
+          getFileWarning(file, stages),
+          t,
+          file?.translationFailures?.length || 0,
+        );
         const missedSpeechWarning = file?.missedSpeechSummary?.count
           ? t('row.missedSpeechWarning', {
               count: file.missedSpeechSummary.count,
@@ -423,9 +428,6 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
         const started = stages.some(
           (s) => getStageStatus(file, s.key) !== 'pending',
         );
-        const cancelling =
-          taskStatus === 'cancelling' &&
-          stages.some((s) => getStageStatus(file, s.key) === 'loading');
         const meta = [
           formatBytes(file?.fileSize),
           formatMediaDuration(file?.duration),
@@ -449,7 +451,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
           <div
             key={file?.uuid}
             className={cn(
-              'group rounded-lg border px-3 py-2.5 transition-colors hover:bg-muted/40',
+              'group rounded-lg border border-transparent bg-card px-3 py-2.5 transition-colors hover:bg-muted/40',
               failed && 'border-destructive/30',
               !failed && displayWarning && 'border-warning/30',
             )}
@@ -566,6 +568,21 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
                     </Button>
                   </>
                 )}
+                {failed &&
+                  file.dubbingSessionId &&
+                  onInspectDubbing &&
+                  !dockedGate && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1 text-xs"
+                      disabled={queueBusy}
+                      onClick={() => onInspectDubbing(file)}
+                    >
+                      <AudioLines className="h-3 w-3" />
+                      {t('gate.inspectDubbing')}
+                    </Button>
+                  )}
                 {failed && (
                   <Button
                     variant="outline"
@@ -618,40 +635,23 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
               </div>
             </div>
 
-            {cancelling && (
-              <p className="mt-1.5 pl-5 text-xs text-warning">
-                {t('row.cancelling')}
-              </p>
-            )}
-
-            {failed && errorMsg && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <p className="mt-1.5 pl-5 text-xs text-destructive truncate cursor-default">
-                      {errorMsg}
-                    </p>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-md">
-                    <p className="break-all">{errorMsg}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
-            {!failed && displayWarning && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <p className="mt-1.5 pl-5 text-xs text-warning truncate cursor-default">
-                      {displayWarning}
-                    </p>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-md">
-                    <p className="break-all">{displayWarning}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
+            <TaskActivityDetails
+              activity={file.taskActivity}
+              state={status.state}
+              stage={status.stage}
+              statusText={
+                errorMsg ||
+                t(`activity.status.${status.state}`, {
+                  stage: status.labelKey ? t(status.labelKey) : '',
+                })
+              }
+              warning={displayWarning}
+              progress={
+                file.taskActivity?.stage
+                  ? file[`${file.taskActivity.stage}Progress`]
+                  : undefined
+              }
+            />
           </div>
         );
       })}

@@ -1,5 +1,6 @@
 import type { ResolvedGlossaryEntry } from '../../../types/glossary';
 import type { ProviderFallbackRunner } from '../services/providerFallback';
+import type { ActivityObserver } from '../../../types/taskActivity';
 
 export interface Subtitle {
   id: string;
@@ -17,11 +18,13 @@ export interface TranslationResult {
 }
 
 export interface TranslationConfig {
+  onActivity?: ActivityObserver;
   sourceLanguage: string;
   targetLanguage: string;
   provider: Provider;
   translator: TranslatorFunction;
   glossaryEntries?: ResolvedGlossaryEntry[];
+  subtitleTranslationStyle?: 'neutral' | 'conversational';
   signal?: AbortSignal;
   /** 同一任务内按顺序尝试的备用实例；候选实例必须与 provider.type 相同。 */
   fallbackProviders?: Provider[];

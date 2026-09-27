@@ -5,6 +5,7 @@
  */
 
 import fs from 'fs';
+import { reserveToolboxOutput } from './outputPath';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import ffmpegStatic from 'ffmpeg-static';
@@ -18,8 +19,14 @@ import type {
 const ffmpegPath = ffmpegStatic.replace('app.asar', 'app.asar.unpacked');
 
 const activeCompressProcesses = new Map<string, ChildProcess>();
+const preparingCompressJobs = new Map<string, AbortController>();
 
 export function cancelVideoCompress(jobId: string): boolean {
+  const preparing = preparingCompressJobs.get(jobId);
+  if (preparing) {
+    preparing.abort();
+    return true;
+  }
   const proc = activeCompressProcesses.get(jobId);
   if (proc) {
     try {
@@ -36,6 +43,7 @@ export function cancelVideoCompress(jobId: string): boolean {
 
 /** 取消并清理所有正在进行的视频压缩任务（应用退出时调用） */
 export function cancelAllCompressProcesses(): void {
+  preparingCompressJobs.forEach((controller) => controller.abort());
   for (const [jobId, proc] of activeCompressProcesses.entries()) {
     try {
       proc.kill('SIGKILL');
@@ -62,13 +70,49 @@ export async function executeVideoCompress(
     };
   }
 
-  const origInfo = await probeVideoInfo(videoPath);
+  const preparation = new AbortController();
+  preparingCompressJobs.set(jobId, preparation);
+  let origInfo: Awaited<ReturnType<typeof probeVideoInfo>>;
+  try {
+    origInfo = await probeVideoInfo(videoPath, preparation.signal);
+  } finally {
+    preparingCompressJobs.delete(jobId);
+  }
+  if (preparation.signal.aborted)
+    return {
+      success: false,
+      outputPath: '',
+      originalSize: 0,
+      compressedSize: 0,
+      error: 'Cancelled',
+    };
+  const targetBytes =
+    (preset === 'wechat_25mb' ? 24 : targetSizeMb) * 1024 * 1024;
+  const sizeOnly = preset === 'wechat_25mb' || preset === 'target_size';
+  // Reuse only already-compatible MP4 files. Other formats still need conversion.
+  if (
+    sizeOnly &&
+    origInfo.size <= targetBytes &&
+    /\.mp4$/i.test(videoPath) &&
+    origInfo.videoCodec === 'h264' &&
+    (!origInfo.hasAudio || origInfo.audioCodec === 'aac')
+  ) {
+    onProgress?.(100);
+    return {
+      success: true,
+      skipped: true,
+      outputPath: videoPath,
+      originalSize: origInfo.size,
+      compressedSize: origInfo.size,
+    };
+  }
   const dir = outputPath ? path.dirname(outputPath) : path.dirname(videoPath);
   const ext = path.extname(videoPath);
   const baseName = path.basename(videoPath, ext);
 
-  const targetOutput =
-    outputPath || path.join(dir, `${baseName}_compressed.mp4`);
+  const targetOutput = reserveToolboxOutput(
+    outputPath || path.join(dir, `${baseName}_compressed.mp4`),
+  );
 
   const args: string[] = ['-hide_banner', '-y', '-i', videoPath];
 
@@ -193,6 +237,9 @@ export async function executeVideoCompress(
 
     proc.on('error', (err) => {
       activeCompressProcesses.delete(jobId);
+      try {
+        fs.unlinkSync(targetOutput);
+      } catch {}
       reject(err);
     });
   });

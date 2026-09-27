@@ -7,6 +7,7 @@
  */
 
 import fs from 'fs';
+import { reserveToolboxOutput } from './outputPath';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import ffmpegStatic from 'ffmpeg-static';
@@ -116,7 +117,9 @@ export function executeAudioExtract(
     const ext = path.extname(videoPath);
     const baseName = path.basename(videoPath, ext);
 
-    const targetOutput = outputPath || path.join(dir, `${baseName}.${format}`);
+    const targetOutput = reserveToolboxOutput(
+      outputPath || path.join(dir, `${baseName}.${format}`),
+    );
     const args = buildAudioExtractArgs(config, targetOutput);
 
     logMessage(
@@ -188,6 +191,9 @@ export function executeAudioExtract(
 
     proc.on('error', (err) => {
       activeExtractProcesses.delete(jobId);
+      try {
+        fs.unlinkSync(targetOutput);
+      } catch {}
       reject(err);
     });
   });

@@ -1,3 +1,4 @@
+import { TaskActivityDetails } from './TaskActivityDetails';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AudioLines,
@@ -32,6 +33,7 @@ import {
   getFileStages,
   getFileRail,
   getStageStatus,
+  getTaskDisplayStatus,
   getDockedGate,
   getFilePercent,
   getFileError,
@@ -45,12 +47,7 @@ import {
 } from './stageUtils';
 import { RailChips } from './TaskRowList';
 import { ManuscriptRowBadge } from './ManuscriptRowBadge';
-import {
-  SPEAKER_DIARIZATION_METADATA_SAVE_FAILED,
-  TRANSLATION_INCOMPLETE_PIPELINE_PAUSED,
-  TRANSLATION_INCOMPLETE_FOR_DUBBING,
-  TRANSLATION_INCOMPLETE_FOR_COMPOSE,
-} from '../../../types';
+import { formatTaskMessage } from './taskMessages';
 
 interface TaskGridListProps {
   files: any[];
@@ -257,26 +254,25 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
         const stages = getFileStages(file, typeDef, formData);
         const rail = getFileRail(file, typeDef, formData);
         const dockedGate = getDockedGate(file, formData);
+        const status = getTaskDisplayStatus(
+          file,
+          stages,
+          taskStatus,
+          dockedGate,
+        );
         const percent = getFilePercent(file, stages);
         const failed = hasFileError(file, stages);
         const rawError = failed ? getFileError(file, stages) : '';
-        const errorMsg =
-          rawError === 'TASK_INTERRUPTED'
-            ? t('interrupted')
-            : rawError === TRANSLATION_INCOMPLETE_PIPELINE_PAUSED
-              ? t('row.translationIncompletePipelinePaused', {
-                  count: file?.translationFailures?.length || 0,
-                })
-              : rawError === TRANSLATION_INCOMPLETE_FOR_DUBBING
-                ? t('row.translationIncompleteForDubbing')
-                : rawError === TRANSLATION_INCOMPLETE_FOR_COMPOSE
-                  ? t('row.translationIncompleteForCompose')
-                  : rawError;
-        const rawWarning = getFileWarning(file, stages);
-        const warningMsg =
-          rawWarning === SPEAKER_DIARIZATION_METADATA_SAVE_FAILED
-            ? t('row.speakerDiarizationMetadataSaveFailed')
-            : rawWarning;
+        const errorMsg = formatTaskMessage(
+          rawError,
+          t,
+          file?.translationFailures?.length || 0,
+        );
+        const warningMsg = formatTaskMessage(
+          getFileWarning(file, stages),
+          t,
+          file?.translationFailures?.length || 0,
+        );
         const missedSpeechWarning = file?.missedSpeechSummary?.count
           ? t('row.missedSpeechWarning', {
               count: file.missedSpeechSummary.count,
@@ -323,7 +319,7 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
           <div
             key={file?.uuid}
             className={cn(
-              'group relative flex flex-col gap-2 rounded-lg border p-2 transition-colors hover:bg-muted/40',
+              'group relative flex flex-col gap-2 rounded-lg border border-transparent bg-card p-2 transition-colors hover:bg-muted/40',
               failed && 'border-destructive/30',
               !failed && displayWarning && 'border-warning/30',
             )}
@@ -395,34 +391,23 @@ const TaskGridList: React.FC<TaskGridListProps> = ({
               </span>
             </div>
 
-            {failed && errorMsg && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <p className="cursor-default truncate text-xs text-destructive">
-                      {errorMsg}
-                    </p>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-md">
-                    <p className="break-all">{errorMsg}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
-            {!failed && displayWarning && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <p className="cursor-default truncate text-xs text-warning">
-                      {displayWarning}
-                    </p>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-md">
-                    <p className="break-all">{displayWarning}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
+            <TaskActivityDetails
+              activity={file.taskActivity}
+              state={status.state}
+              stage={status.stage}
+              statusText={
+                errorMsg ||
+                t(`activity.status.${status.state}`, {
+                  stage: status.labelKey ? t(status.labelKey) : '',
+                })
+              }
+              warning={displayWarning}
+              progress={
+                file.taskActivity?.stage
+                  ? file[`${file.taskActivity.stage}Progress`]
+                  : undefined
+              }
+            />
 
             <div className="mt-auto flex items-center justify-end gap-1">
               {dockedGate && (

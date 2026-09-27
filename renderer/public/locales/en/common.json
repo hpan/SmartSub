@@ -21,8 +21,21 @@
     "settings": "Settings"
   },
   "statusbar": {
+    "checking": "Checking",
+    "checkFailed": "Health check failed",
+    "unverified": "Configured · connection unverified",
+    "connected": "Connection verified (within 5 min)",
+    "failed": "Connection failed",
+    "serviceConnected": "{{count}} service connections verified",
+    "serviceFailed": "Service connection failed",
     "engineReady": "Engine ready",
-    "gpuPending": "Detecting"
+    "gpuPending": "Detecting",
+    "modelReady": "Model ready",
+    "modelMissing": "No local model",
+    "serviceConfigured": "Cloud configured",
+    "serviceMissing": "No cloud service",
+    "gpuAccel": "GPU acceleration",
+    "cpuMode": "CPU mode"
   },
   "tasks": "Tasks",
   "modelManagement": "Model Management",
@@ -251,6 +264,7 @@
     "groupTasks": "Task page",
     "groupEditor": "Proofread editor",
     "commandPalette": "Command palette",
+    "toggleAssistant": "Toggle AI assistant",
     "openSettings": "Open settings",
     "showShortcuts": "Show shortcuts",
     "importFiles": "Import files",
@@ -319,6 +333,46 @@
     "sampleProjectName": "Sample · First subtitle",
     "sampleFailed": "Failed to set up the sample task. Try again or import a file manually."
   },
+  "draftRecovery": {
+    "readFailedTitle": "Draft could not be read",
+    "readFailedDescription": "The draft is damaged or local storage is unavailable. The original data is preserved. Retry reading or explicitly discard this draft.",
+    "retryRead": "Retry reading",
+    "title": "Recover unsaved work?",
+    "description": "An unsaved draft is available for this work. Restore it to continue editing.",
+    "restore": "Restore draft",
+    "discard": "Discard draft",
+    "storageFailed": "Draft storage failed. Save your work before closing the application.",
+    "wizardStorageFailed": "The draft was not written to local storage and may be lost after restarting. Free up storage space, then retry saving."
+  },
+  "providerPersistence": {
+    "loading": "Loading service configuration...",
+    "loadFailed": "Service configuration could not be loaded. Editing is unavailable.",
+    "saveFailed": "Service configuration is not saved.",
+    "repair": "Check configuration directory permissions and available space, then retry. Your changes are retained.",
+    "conflict": "Another window changed the service configuration. Your input is retained. Review it before discarding and reloading.",
+    "reload": "Reload",
+    "discardReload": "Discard changes and reload",
+    "discardDescription": "Unsaved service configuration on this page will be discarded and the latest configuration will be loaded from disk."
+  },
+  "saveState": {
+    "retry": "Retry save",
+    "idle": "",
+    "dirty": "Unsaved changes",
+    "saving": "Saving...",
+    "saved": "Saved",
+    "save_error": "Save failed",
+    "details": "Error details"
+  },
+  "navigationGuard": {
+    "discardFailed": "The draft could not be discarded. Check the page error details and retry before leaving.",
+    "title": "Unsaved changes",
+    "desc": "You have unsaved changes that will be lost if you leave this page. Would you like to save them first?",
+    "keepEditing": "Stay on page",
+    "discardAndLeave": "Discard and leave",
+    "saveAndLeave": "Save and leave",
+    "saving": "Saving...",
+    "changedDuringSave": "More changes were made while saving. Save again or stay on this page to review them."
+  },
   "undo": "Undo",
   "checkingForUpdates": "Checking for updates…",
   "alreadyLatestVersion": "You are on the latest version",
@@ -335,6 +389,12 @@
   "cpuModeBadge": "CPU mode",
   "cpuModeTip": "Transcription runs on CPU. Click to view acceleration options.",
   "coarseTimeline": "Coarse timeline",
+  "gateRelease": {
+    "pending": "Release confirmation pending",
+    "failed": "Release could not be confirmed",
+    "details": "Details",
+    "retry": "Retry release"
+  },
   "engineBadge": {
     "builtin": "Whisper.cpp",
     "fasterWhisper": "Faster-Whisper",
@@ -346,5 +406,85 @@
     "cloud": "Cloud ASR"
   },
   "videoDownload": "Download",
-  "audioCut": "Cut"
+  "audioCut": "Cut",
+  "assistant": {
+    "title": "AI assistant",
+    "new": "New conversation",
+    "close": "Close assistant",
+    "history": "Conversation history",
+    "delete": "Delete conversation",
+    "deleteHint": "Only chat history is deleted. Creation tasks are kept.",
+    "service": "AI service",
+    "chooseService": "Choose a compatible AI service",
+    "configure": "Configure an AI model with tool support in translation services",
+    "you": "You",
+    "line": "Line {{index}}",
+    "draft": "Unsaved",
+    "context": "Use current context",
+    "hasErrors": "Includes error details",
+    "input": "Message to AI assistant",
+    "placeholder": "Send a message or drop files…",
+    "inputHint": "Enter to send · Shift+Enter for a new line · {{shortcut}} to toggle assistant",
+    "send": "Send",
+    "stop": "Stop",
+    "working": "Working…",
+    "progress": "Processing",
+    "viewTask": "View task",
+    "cancelTask": "Cancel task",
+    "welcome": "Create with your AI assistant",
+    "description": "Ask a question, attach files, or create with your workspace. Subtitle edits remain undoable drafts.",
+    "exampleEdit": "Make the current subtitle sound more natural",
+    "exampleTask": "Create English–Chinese subtitles for this video and compose it",
+    "exampleModels": "Show my installed models",
+    "interrupted": "This turn stopped. Submitted tasks continue and can be cancelled in their task cards.",
+    "limited": "This turn reached its execution limit. Send “continue” to proceed; existing tasks are kept.",
+    "errorHint": "This turn could not finish. Check that the service and model support tool calling, or resolve the error below before retrying.",
+    "status": {
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "interrupted": "Interrupted",
+      "queued": "Queued",
+      "paused": "Paused",
+      "cancelling": "Cancelling",
+      "cancelled": "Cancelled",
+      "review": "Review"
+    },
+    "tools": {
+      "discover_tools": "Find tools",
+      "load_tools": "Load tools",
+      "context": "Read workspace context",
+      "editor_read": "Read subtitles",
+      "editor_edit": "Edit subtitle draft",
+      "editor_locate": "Locate subtitle",
+      "editor_save": "Save subtitles",
+      "capture_screen": "Capture screen"
+    },
+    "captureScreen": "Capture workspace screen",
+    "screenshotPreview": "Workspace screenshot",
+    "openScreenshot": "View file",
+    "screenshotFailed": "Failed to capture screen, please try again.",
+    "resize": "Resize assistant",
+    "closeHistory": "Close conversation history",
+    "emptyHistory": "No conversations yet",
+    "attach": "Attach files",
+    "removeAttachment": "Remove {{name}}",
+    "dropFiles": "Drop files to attach",
+    "attachmentHint": "Media, subtitles, manuscripts and JSON files send local paths only. Images send content, up to 5 MB, and require a vision model. Up to 8 files.",
+    "attachmentLimit": "Attach up to 8 files per message.",
+    "attachmentFailed": "Could not attach files. Try again or choose local files.",
+    "analyzeAttachments": "Please analyze these attachments.",
+    "attachmentKind": {
+      "audio": "Audio · local path only",
+      "video": "Video · local path only",
+      "image": "Vision model required",
+      "file": "Local path only"
+    },
+    "attachmentErrors": {
+      "ATTACHMENT_TOO_LARGE": "Images must be 5 MB or smaller.",
+      "ATTACHMENT_NOT_FILE": "Choose a file. Folders are not supported.",
+      "unreadable": "Could not access the file. Check that it is still available locally.",
+      "ATTACHMENT_UNSUPPORTED": "Unsupported format. Choose media, subtitles, TXT/MD manuscripts, JSON files or images."
+    }
+  }
 }

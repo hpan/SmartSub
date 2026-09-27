@@ -1,19 +1,25 @@
+import { ipcMain } from '../automation/handlers';
 import fse from 'fs-extra';
-import { ipcMain, BrowserWindow, Notification } from 'electron';
+import { backgroundEvent } from '../automation/events';
+import { BrowserWindow, Notification } from 'electron';
 import { processFile } from './fileProcessor';
 import { checkOpenAiWhisper, getPath } from './whisper';
 import { logMessage, store } from './storeManager';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { isAppleSilicon } from './utils';
 import { IFiles } from '../../types';
-import { isPinnedTaskConfigSnapshot } from '../../types/taskSnapshot';
-import { enforceSpeakerDiarizationTaskBoundary } from '../../types/speakerDiarization';
+import type {
+  TaskSubmission,
+  TaskSubmissionResult,
+} from '../../types/taskSubmission';
+import { persistTaskSubmission } from './taskSubmission';
 import { ExtendedProvider, CustomParameterConfig } from '../../types/provider';
 import { resolveProviderFallbacks } from './providerMigration';
 import { configurationManager } from '../service/configurationManager';
 import { applyTaskEventToProjects } from './taskManager';
-import { getWorkItemById, saveWorkItem } from './workItemStore';
-import { runWithTaskContext } from './taskContext';
+import { getWorkItemById } from './workItemStore';
+import { getTaskContext, runWithTaskContext } from './taskContext';
 import { killFfmpegForFiles } from './audioProcessor';
 import {
   listEngineAdapters,
@@ -26,6 +32,7 @@ import {
 } from './powerSaveManager';
 
 const TASK_EVENT_CHANNELS = new Set([
+  'taskActivityChange',
   'taskStatusChange',
   'taskProgressChange',
   'taskErrorChange',
@@ -41,9 +48,16 @@ function wrapTaskEvent(event: any) {
   return {
     ...event,
     sender: {
+      id: sender.id,
+      isAutomation: sender.isAutomation,
       send: (channel: string, ...args: any[]) => {
         if (TASK_EVENT_CHANNELS.has(channel)) {
           applyTaskEventToProjects(channel, ...args);
+          args[0] = {
+            ...args[0],
+            taskProjectId:
+              getTaskContext()?.projectId ?? args[0]?.taskProjectId,
+          };
         }
         try {
           sender.send(channel, ...args);
@@ -100,10 +114,14 @@ function hasRunnableQueuedTasks(): boolean {
 }
 
 function syncTranscriptionPowerSaveBlocker() {
-  if (activeTasksCount > 0 || hasRunnableQueuedTasks()) {
-    acquireTaskPowerSaveBlocker(TRANSCRIPTION_POWER_SAVE_REASON);
-  } else {
-    releaseTaskPowerSaveBlocker(TRANSCRIPTION_POWER_SAVE_REASON);
+  try {
+    if (activeTasksCount > 0 || hasRunnableQueuedTasks()) {
+      acquireTaskPowerSaveBlocker(TRANSCRIPTION_POWER_SAVE_REASON);
+    } else {
+      releaseTaskPowerSaveBlocker(TRANSCRIPTION_POWER_SAVE_REASON);
+    }
+  } catch (error) {
+    logMessage(`Task power save blocker failed: ${error}`, 'warning');
   }
 }
 
@@ -119,6 +137,20 @@ export function getTranscriptionBusyCount(): number {
  */
 export function isTranscriptionBusy(): boolean {
   return getTranscriptionBusyCount() > 0;
+}
+
+export function isTaskProjectBusy(projectId: string): boolean {
+  return (
+    (projectRuntimes.get(projectId)?.active || 0) > 0 ||
+    processingQueue.some((item) => item.projectId === projectId)
+  );
+}
+
+/** Capture the accepted run's signal; it survives removal of a drained runtime. */
+export function getTaskProjectSignal(
+  projectId: string,
+): AbortSignal | undefined {
+  return projectRuntimes.get(projectId)?.controller.signal;
 }
 
 function ensureRuntime(projectId: string): ProjectRuntime {
@@ -238,51 +270,21 @@ async function createExtendedProvider(
 }
 
 /** 任务派发共用体：渲染层 handleTask 与主进程内部派发（闸门放行）同路径。 */
-async function startTaskRun(
-  event: any,
-  {
-    files,
-    formData: incomingFormData,
-    projectId,
-  }: { files: IFiles[]; formData: any; projectId?: string },
-) {
-  const pid = projectId || DEFAULT_PROJECT_ID;
+function startTaskRun(event: any, input: TaskSubmission): TaskSubmissionResult {
+  const pid = input.projectId;
+  const busyFiles = new Set([
+    ...Array.from(projectRuntimes.get(pid)?.activeFiles || []),
+    ...processingQueue
+      .filter((item) => item.projectId === pid)
+      .map((item) => item.file.uuid),
+  ]);
+  const {
+    result,
+    submission: { files, formData },
+  } = persistTaskSubmission(input, busyFiles);
+  if (result.duplicate) return result;
+  // The durable intent and in-memory queue are published without an await gap.
   dispatchEvent = event;
-
-  // 任务级配置快照：带附加阶段、参考文稿或角色分离的任务以创建时快照为准，
-  // 重试/续跑不受此后全局设置变更影响；首次提交时把有效配置写入快照。
-  let formData = enforceSpeakerDiarizationTaskBoundary({
-    ...(incomingFormData || {}),
-  });
-  const workItem = getWorkItemById(pid);
-  if (workItem) {
-    const snapshot = workItem.configSnapshot as any;
-    if (isPinnedTaskConfigSnapshot(snapshot)) {
-      // 固定快照任务的重试/闸门续跑始终复用创建时配置，禁止当前全局表单覆盖。
-      formData = enforceSpeakerDiarizationTaskBoundary({ ...snapshot });
-      if (
-        snapshot?.speakerDiarization !== undefined &&
-        formData.speakerDiarization === undefined
-      ) {
-        // 迁移早期预览版曾允许流水线携带角色分离；首次续跑时清掉无效残留。
-        saveWorkItem({
-          ...workItem,
-          configSnapshot: { ...formData },
-        });
-      }
-      logMessage(`handleTask: using config snapshot for ${pid}`, 'info');
-    } else {
-      saveWorkItem({
-        ...workItem,
-        configSnapshot: { ...(formData || {}) },
-      });
-    }
-  }
-
-  await runWithTaskContext({ projectId: pid }, async () => {
-    logMessage(`handleTask start`, 'info');
-    logMessage(`formData: \n ${JSON.stringify(formData, null, 2)}`, 'info');
-  });
   const runtime = ensureRuntime(pid);
   // 重新开始：清除上一轮的暂停/取消残留
   runtime.paused = false;
@@ -297,33 +299,55 @@ async function startTaskRun(
   updateTaskbarProgress();
   syncTranscriptionPowerSaveBlocker();
   // 每批都刷新并发上限：流水线跑着时追加新批次，用户最新设置也能生效
-  maxConcurrentTasks = formData.maxConcurrentTasks || 3;
+  const concurrency = Number(formData.maxConcurrentTasks);
+  maxConcurrentTasks =
+    Number.isInteger(concurrency) && concurrency > 0 ? concurrency : 3;
   if (!isProcessing) {
     isProcessing = true;
-    hasOpenAiWhisper = await checkOpenAiWhisper();
-    // 预热 sidecar：把冷启动成本移出首个文件关键路径（faster-whisper 等需运行时引擎）。
-    // ensureStarted 成功后再 prewarm（按引擎预加载模型），与首个文件的音频抽取并行，
-    // 避免 FunASR 等首个 transcribe 因首次加载原生库/ONNX 过慢而长时间卡在 0%。
-    try {
-      // 按本批任务携带的引擎预热（缺省回退全局/默认）。
-      const batchAdapter = getEngineAdapterForTask(formData);
-      if (batchAdapter.requiresRuntime && batchAdapter.pyEngineId) {
-        // Python 运行时引擎（faster-whisper）：先拉起 sidecar 再预热。
-        void getPythonRuntimeManager()
-          .ensureStarted(batchAdapter.pyEngineId)
-          .then(() => batchAdapter.prewarm?.(formData))
-          .catch((e) =>
-            logMessage(`engine warmup failed (non-fatal): ${e}`, 'warning'),
-          );
-      } else if (batchAdapter.prewarm) {
-        // 无 Python 的引擎（funasr/sherpa）：worker 线程直接预加载模型。
-        batchAdapter.prewarm(formData);
-      }
-    } catch (e) {
-      logMessage(`engine warmup skipped: ${e}`, 'warning');
-    }
-    processNextTasks(event);
+    void initializeTaskRun(event, formData, files);
   }
+  return result;
+}
+
+async function initializeTaskRun(event: any, formData: any, files: IFiles[]) {
+  try {
+    hasOpenAiWhisper = await checkOpenAiWhisper();
+  } catch (error) {
+    hasOpenAiWhisper = false;
+    logMessage(`Whisper CLI detection failed: ${error}`, 'warning');
+  }
+  // 预热 sidecar：把冷启动成本移出首个文件关键路径（faster-whisper 等需运行时引擎）。
+  // ensureStarted 成功后再 prewarm（按引擎预加载模型），与首个文件的音频抽取并行，
+  // 避免 FunASR 等首个 transcribe 因首次加载原生库/ONNX 过慢而长时间卡在 0%。
+  try {
+    if (
+      files.every(
+        (file) =>
+          file.providedSubtitlePath ||
+          /\.(srt|vtt|ass|ssa|txt)$/i.test(file.filePath),
+      )
+    ) {
+      processNextTasks(event);
+      return;
+    }
+    // 按本批任务携带的引擎预热（缺省回退全局/默认）。
+    const batchAdapter = getEngineAdapterForTask(formData);
+    if (batchAdapter.requiresRuntime && batchAdapter.pyEngineId) {
+      // Python 运行时引擎（faster-whisper）：先拉起 sidecar 再预热。
+      void getPythonRuntimeManager()
+        .ensureStarted(batchAdapter.pyEngineId)
+        .then(() => batchAdapter.prewarm?.(formData))
+        .catch((e) =>
+          logMessage(`engine warmup failed (non-fatal): ${e}`, 'warning'),
+        );
+    } else if (batchAdapter.prewarm) {
+      // 无 Python 的引擎（funasr/sherpa）：worker 线程直接预加载模型。
+      batchAdapter.prewarm(formData);
+    }
+  } catch (e) {
+    logMessage(`engine warmup skipped: ${e}`, 'warning');
+  }
+  processNextTasks(event);
 }
 
 /**
@@ -335,24 +359,60 @@ export function enqueueProjectFiles(
   files: IFiles[],
   formData: any,
 ): boolean {
-  if (!progressWindow || progressWindow.isDestroyed()) {
-    logMessage('enqueueProjectFiles: no window available', 'warning');
+  const event = backgroundEvent;
+  try {
+    return startTaskRun(event, {
+      files,
+      formData,
+      projectId,
+      requestId: randomUUID(),
+    }).success;
+  } catch (error) {
+    logMessage(`enqueueProjectFiles failed: ${error}`, 'error');
     return false;
   }
-  const event = { sender: progressWindow.webContents };
-  void startTaskRun(event, { files, formData, projectId });
-  return true;
+}
+
+/** Durable, idempotent handoff from another main-process workflow. */
+export function enqueueTaskSubmission(
+  input: TaskSubmission,
+): TaskSubmissionResult {
+  return startTaskRun(backgroundEvent, input);
 }
 
 export function setupTaskProcessor(mainWindow: BrowserWindow) {
   progressWindow = mainWindow;
+  ipcMain.handle(
+    'submitTask',
+    (event, payload: TaskSubmission): TaskSubmissionResult => {
+      try {
+        return startTaskRun(event, payload);
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
   ipcMain.on(
     'handleTask',
     async (
       event,
       payload: { files: IFiles[]; formData: any; projectId?: string },
     ) => {
-      await startTaskRun(event, payload);
+      try {
+        startTaskRun(event, {
+          ...payload,
+          projectId: payload.projectId || DEFAULT_PROJECT_ID,
+          requestId: randomUUID(),
+        });
+      } catch (error) {
+        event.sender.send(
+          'message',
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     },
   );
 
@@ -415,6 +475,7 @@ export function setupTaskProcessor(mainWindow: BrowserWindow) {
           'warning',
         );
       } else {
+        if (removedCount > 0) runtime?.controller.abort();
         projectRuntimes.delete(id);
         sendTaskComplete(event, id, 'cancelled');
       }
@@ -468,6 +529,7 @@ export function setupTaskProcessor(mainWindow: BrowserWindow) {
 
 /** 工程执行排空且应用不在前台时发系统通知（有停靠文件时表达「等待校对」） */
 function notifyProjectDone(event, projectId?: string) {
+  if (event.sender?.isAutomation) return;
   try {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win?.isFocused()) return;

@@ -1,3 +1,5 @@
+import { TaskActivityReporter } from './taskActivity';
+import { runWithTaskContext } from './taskContext';
 import path from 'path';
 import fs from 'fs';
 import { logMessage } from './storeManager';
@@ -59,7 +61,7 @@ import {
 import { runSpeakerDiarizationStage } from './speakerDiarization/stage';
 import type { SpeakerDiarizationSegment } from './speakerDiarization/alignment';
 import {
-  isSpeakerDiarizationStandardTaskContext,
+  supportsSpeakerDiarizationTask,
   shouldExtractAudioForEmbeddedSubtitle,
   getSpeakerDiarizationMetadataWarning,
 } from '../../types/speakerDiarization';
@@ -142,6 +144,10 @@ async function translateSubtitle(
   provider,
   fallbackProviders = [],
 ): Promise<boolean> {
+  const activity = getTaskContext()?.activity?.start(
+    'translateSubtitle',
+    'preparing',
+  );
   // 强制发送翻译开始状态
   event.sender.send('taskFileChange', {
     ...file,
@@ -153,7 +159,7 @@ async function translateSubtitle(
   event.sender.send('taskProgressChange', file, 'translateSubtitle', 0);
 
   const onProgress = (progress) => {
-    const normalizedProgress = Math.min(Math.max(progress, 0), 100);
+    const normalizedProgress = Math.min(Math.max(progress, 0), 99);
     event.sender.send(
       'taskProgressChange',
       file,
@@ -171,7 +177,10 @@ async function translateSubtitle(
       onProgress,
       undefined,
       fallbackProviders,
+      activity?.update,
     );
+    throwIfTaskCancelled();
+    activity?.finish();
 
     // 确保最终状态的正确发送（无论是否有部分行失败，翻译阶段产物均已生成并落盘）
     event.sender.send('taskProgressChange', file, 'translateSubtitle', 100);
@@ -197,6 +206,9 @@ async function translateSubtitle(
     }
     return !hasFailures;
   } catch (error) {
+    activity?.finish(
+      isTaskCancelledError(error) || isTaskCancelled() ? 'cancelled' : 'error',
+    );
     if (isTaskCancelledError(error) || isTaskCancelled()) {
       // 用户取消：翻译阶段回退为待处理，不计错误，并中止后续流程
       event.sender.send('taskFileChange', {
@@ -215,7 +227,7 @@ async function translateSubtitle(
 /**
  * 处理文件
  */
-export async function processFile(
+async function processFileImpl(
   event,
   file: IFiles,
   formData,
@@ -295,6 +307,8 @@ export async function processFile(
 
   const previousProofreadDataReady = file.proofreadDataReady;
   const previousExportSubtitle = file.exportSubtitle;
+  const previousSpeakerDiarization = file.speakerDiarization;
+  const previousSpeakerDiarizationError = file.speakerDiarizationError;
   const retryExport =
     previousExportSubtitle === 'error' ||
     Boolean(file.subtitleExportCheckpoint && previousExportSubtitle !== 'done');
@@ -335,7 +349,13 @@ export async function processFile(
     'exportSubtitleProgress',
   ]) {
     if (retryExport && !k.startsWith('exportSubtitle')) continue;
-    delete (file as any)[k];
+    // IPC and saved task records merge patches: deleting a local error key
+    // leaves the previous value in those copies. Send an explicit reset.
+    if (k.endsWith('Error') || k.endsWith('ErrorDetail')) {
+      (file as any)[k] = undefined;
+    } else {
+      delete (file as any)[k];
+    }
   }
   file.exportSubtitle = '';
   file.exportSubtitleError = undefined;
@@ -399,9 +419,8 @@ export async function processFile(
     const speakerDiarizationStageActive =
       !isSubtitleFile &&
       shouldGenerateSubtitle &&
-      !hasProvidedSubtitle &&
       formData?.speakerDiarization === true &&
-      isSpeakerDiarizationStandardTaskContext(formData);
+      supportsSpeakerDiarizationTask(formData);
 
     /** 文件停靠在人工检查点：置待校对、发聚合通知、结束本轮（不占并发槽） */
     const dockAtGate = (gate: 'subtitle' | 'dubbing') => {
@@ -518,10 +537,20 @@ export async function processFile(
         (previousExportSubtitle === undefined ||
           previousExportSubtitle === 'done') &&
         (isSubtitleFile ? true : resume.subtitleProduced) &&
-        (!translationActive || resume.translateDone),
+        (!translationActive || resume.translateDone) &&
+        (!speakerDiarizationStageActive ||
+          (previousSpeakerDiarization === 'done' &&
+            previousProofreadDataReady === 'done' &&
+            file.proofreadDataFile &&
+            fs.existsSync(file.proofreadDataFile))),
     );
     if (skipSubtitleSegment) {
       file.exportSubtitle = 'done';
+      if (speakerDiarizationStageActive) {
+        file.speakerDiarization = 'done';
+        file.speakerDiarizationProgress = 100;
+        file.speakerDiarizationError = previousSpeakerDiarizationError;
+      }
       logMessage(`resume: reuse subtitle segment for ${fileName}`, 'info');
       if (isSubtitleFile) {
         file.srtFile = filePath;
@@ -574,6 +603,21 @@ export async function processFile(
         'info',
       );
       file.srtFile = file.providedSubtitlePath;
+      if (speakerDiarizationStageActive) {
+        event.sender.send('taskFileChange', {
+          ...file,
+          extractAudio: 'loading',
+        });
+        try {
+          await extractAudioFromVideo(event, file);
+        } catch (error) {
+          if (!isTaskCancelledError(error) && !isTaskCancelled()) {
+            (file as any).extractAudio = 'error';
+            onError(event, file, 'extractAudio', error);
+          }
+          throw error;
+        }
+      }
       event.sender.send('taskFileChange', { ...file, extractAudio: 'done' });
       event.sender.send('taskFileChange', {
         ...file,
@@ -865,7 +909,8 @@ export async function processFile(
       await stripSourceSubtitlePunctuation(file.srtFile, fileName);
     }
 
-    // 可选角色分离：仅对标准字幕任务中本轮真实 ASR 的音频执行。放在翻译之后，
+    // Media tasks, including supplied/embedded subtitles, share local role analysis.
+    // 放在翻译之后，
     // 避免角色信息污染翻译提示；独立阶段保持 loading，直到 sidecar 写入完成后
     // 才置 done，从而保证校对入口不会抢先读到旧内容。
     let speakerSegments: SpeakerDiarizationSegment[] | undefined;
@@ -877,13 +922,26 @@ export async function processFile(
       delete file.speakerDiarizationError;
       event.sender.send('taskFileChange', { ...file });
       logMessage(`speaker diarization stage started: ${fileName}`, 'info');
-      const result = await runSpeakerDiarizationStage({
-        file,
-        formData,
-        signal: getTaskContext()?.signal,
-      });
-      speakerSegments = result.segments;
-      speakerDiarizationWarning = result.reason;
+      try {
+        if (!file.tempAudioFile || !fs.existsSync(file.tempAudioFile)) {
+          await extractAudioFromVideo(event, file);
+        }
+        const result = await runSpeakerDiarizationStage({
+          file,
+          formData,
+          signal: getTaskContext()?.signal,
+        });
+        speakerSegments = result.segments;
+        speakerDiarizationWarning = result.reason;
+        if (result.reason)
+          file.speakerDiarizationError = `SPEAKER_DIARIZATION_${result.reason.replace(/-/g, '_').toUpperCase()}`;
+      } catch (error) {
+        if (!isTaskCancelledError(error) && !isTaskCancelled()) {
+          file.speakerDiarization = 'error';
+          onError(event, file, 'speakerDiarization', error);
+        }
+        throw error;
+      }
     }
 
     throwIfTaskCancelled();
@@ -905,6 +963,8 @@ export async function processFile(
         targetLanguage,
         translateContent: formData?.translateContent,
         outputFormat: resolveSubtitleOutputFormats(formData)[0],
+        subtitleLayout: formData.subtitleLayout,
+        subtitleLineWidth: formData.subtitleLineWidth,
         speakerSegments,
         translationFailures: file.translationFailures,
         missedSpeechWarnings: file.missedSpeechWarnings,
@@ -994,4 +1054,30 @@ export async function processFile(
       message: error,
     });
   }
+}
+
+/** Keep activity ownership alive even when the task page is closed. */
+export async function processFile(...args: Parameters<typeof processFileImpl>) {
+  const [event, file] = args;
+  const context = getTaskContext();
+  return runWithTaskContext({ ...context }, async () => {
+    const reporter = new TaskActivityReporter(
+      Math.max(Date.now(), (file.taskActivity?.run ?? 0) + 1),
+      (activity) => {
+        file.taskActivity = activity;
+        event.sender.send(
+          'taskActivityChange',
+          { uuid: file.uuid, taskProjectId: context?.projectId },
+          activity,
+        );
+      },
+      context?.signal,
+    );
+    getTaskContext()!.activity = reporter;
+    try {
+      return await processFileImpl(...args);
+    } finally {
+      reporter.close();
+    }
+  });
 }

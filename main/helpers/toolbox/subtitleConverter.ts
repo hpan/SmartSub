@@ -7,6 +7,7 @@
  */
 
 import fs from 'fs';
+import { reserveToolboxOutput, toolboxOutputDirectory } from './outputPath';
 import path from 'path';
 import { Converter } from 'opencc-js';
 import {
@@ -184,10 +185,7 @@ export async function convertSubtitleFile(
     }
 
     // 4. 计算输出路径
-    const dir =
-      outputDir && fs.existsSync(outputDir)
-        ? outputDir
-        : path.dirname(filePath);
+    const dir = toolboxOutputDirectory(outputDir, filePath);
     const originalExt = path.extname(filePath);
     const baseName = path.basename(filePath, originalExt);
 
@@ -200,6 +198,7 @@ export async function convertSubtitleFile(
       targetFilePath = path.join(dir, newFileName);
     }
 
+    targetFilePath = reserveToolboxOutput(targetFilePath);
     // 5. 编码并原子写入
     const outputBuffer = encodeStringToBuffer(outputContent, targetEncoding);
     const tempFilePath = path.join(
@@ -207,12 +206,17 @@ export async function convertSubtitleFile(
       `.tmp_${Date.now()}_${Math.random().toString(36).slice(2)}.${targetFormat}`,
     );
 
-    await fs.promises.writeFile(tempFilePath, outputBuffer);
     try {
-      await fs.promises.rename(tempFilePath, targetFilePath);
-    } catch {
-      // 跨设备移动失败降级
-      await fs.promises.copyFile(tempFilePath, targetFilePath);
+      await fs.promises.writeFile(tempFilePath, outputBuffer);
+      try {
+        await fs.promises.rename(tempFilePath, targetFilePath);
+      } catch {
+        await fs.promises.copyFile(tempFilePath, targetFilePath);
+      }
+    } catch (error) {
+      await fs.promises.unlink(targetFilePath).catch(() => {});
+      throw error;
+    } finally {
       await fs.promises.unlink(tempFilePath).catch(() => {});
     }
 

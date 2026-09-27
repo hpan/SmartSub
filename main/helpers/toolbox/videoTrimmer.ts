@@ -7,6 +7,7 @@
  */
 
 import fs from 'fs';
+import { reserveToolboxOutput, toolboxOutputDirectory } from './outputPath';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import ffmpegStatic from 'ffmpeg-static';
@@ -79,12 +80,17 @@ export function formatFfmpegTime(seconds: number): string {
 /**
  * 探测视频信息（不依赖外部 ffprobe）
  */
-export function probeVideoInfo(videoPath: string): Promise<{
+export function probeVideoInfo(
+  videoPath: string,
+  signal?: AbortSignal,
+): Promise<{
   duration: number;
   width: number;
   height: number;
   size: number;
   hasAudio: boolean;
+  videoCodec?: string;
+  audioCodec?: string;
 }> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(videoPath)) {
@@ -101,14 +107,25 @@ export function probeVideoInfo(videoPath: string): Promise<{
       return reject(new Error(`Failed to access video file: ${err.message}`));
     }
 
-    const proc = spawn(ffmpegPath, ['-hide_banner', '-i', videoPath]);
+    const proc = spawn(ffmpegPath, ['-hide_banner', '-i', videoPath], {
+      signal,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
     let stderr = '';
+    let processError: Error | undefined;
+    const timeout = setTimeout(() => {
+      processError = new Error('Media probe timed out');
+      proc.kill('SIGKILL');
+    }, 15000);
 
     proc.stderr.on('data', (data) => {
-      stderr += data.toString();
+      stderr = (stderr + data.toString()).slice(-1024 * 1024);
     });
 
     proc.on('close', (code) => {
+      clearTimeout(timeout);
+      if (processError) return reject(processError);
+      if (signal?.aborted) return reject(new Error('Media probe cancelled'));
       const durationMatch = /Duration:\s*(\d{2,}:\d{2}:\d{2}(?:\.\d+)?)/.exec(
         stderr,
       );
@@ -139,11 +156,13 @@ export function probeVideoInfo(videoPath: string): Promise<{
         height,
         size: stats.size,
         hasAudio: audioMatch,
+        videoCodec: /Video:\s*(\w+)/.exec(stderr)?.[1],
+        audioCodec: /Audio:\s*(\w+)/.exec(stderr)?.[1],
       });
     });
 
     proc.on('error', (err) => {
-      reject(err);
+      processError = err;
     });
   });
 }
@@ -219,12 +238,10 @@ export function executeVideoTrim(
 
     const ext = path.extname(videoPath);
     const baseName = path.basename(videoPath, ext);
-    const targetDir =
-      outputDir && fs.existsSync(outputDir)
-        ? outputDir
-        : outputPath
-          ? path.dirname(outputPath)
-          : path.dirname(videoPath);
+    const targetDir = toolboxOutputDirectory(
+      outputDir || (outputPath ? path.dirname(outputPath) : undefined),
+      videoPath,
+    );
 
     let targetOutput = outputPath;
     if (
@@ -237,6 +254,7 @@ export function executeVideoTrim(
       );
     }
 
+    targetOutput = reserveToolboxOutput(targetOutput);
     const targetDuration = Math.max(0.01, endSec - startSec);
     const args = buildTrimArgs(config, targetOutput);
 
@@ -303,6 +321,9 @@ export function executeVideoTrim(
 
     proc.on('error', (err) => {
       activeTrimProcesses.delete(jobId);
+      try {
+        fs.unlinkSync(targetOutput);
+      } catch {}
       reject(err);
     });
   });

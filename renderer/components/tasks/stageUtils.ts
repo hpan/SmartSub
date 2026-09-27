@@ -1,6 +1,6 @@
 import { isSubtitleFile } from '../../lib/utils';
 import type { TaskTypeDef } from '../../lib/taskTypes';
-import { isSpeakerDiarizationStandardTaskContext } from '../../../types/speakerDiarization';
+import { supportsSpeakerDiarizationTask } from '../../../types/speakerDiarization';
 
 export type StageKey =
   | 'extractAudio'
@@ -33,6 +33,13 @@ export function getFileStages(
   // 配对模式（媒体携带既有字幕）：跳过提取/听写，不在轨道上展示
   const hasProvidedSubtitle = Boolean(file?.providedSubtitlePath);
   const stages: StageDef[] = [];
+  if (
+    !subtitleInput &&
+    hasProvidedSubtitle &&
+    formData?.speakerDiarization === true
+  ) {
+    stages.push({ key: 'extractAudio', labelKey: 'stage.extract' });
+  }
   if (!subtitleInput && !hasProvidedSubtitle) {
     stages.push({ key: 'extractAudio', labelKey: 'stage.extract' });
     stages.push({ key: 'extractSubtitle', labelKey: 'stage.transcribe' });
@@ -68,8 +75,7 @@ export function getFileStages(
   // 角色分离是标准转写任务的独立后处理阶段：翻译之后、任何附加阶段之前。
   if (
     !subtitleInput &&
-    !hasProvidedSubtitle &&
-    isSpeakerDiarizationStandardTaskContext(formData) &&
+    supportsSpeakerDiarizationTask(formData) &&
     (formData?.speakerDiarization === true ||
       file?.speakerDiarization !== undefined)
   ) {
@@ -100,6 +106,48 @@ export function getStageStatus(file: any, key: StageKey): StageStatus {
   if (value === 'done') return 'done';
   if (value === 'error') return 'error';
   return 'pending';
+}
+
+/** One persistent status slot for every task lifecycle state. */
+export function getTaskDisplayStatus(
+  file: any,
+  stages: StageDef[],
+  taskStatus: string,
+  gate: GateDef | null,
+) {
+  const loading = stages.find(
+    (stage) => getStageStatus(file, stage.key) === 'loading',
+  );
+  const failed = stages.find(
+    (stage) => getStageStatus(file, stage.key) === 'error',
+  );
+  const done =
+    stages.length > 0 &&
+    stages.every((stage) => getStageStatus(file, stage.key) === 'done');
+  const state = failed
+    ? 'error'
+    : gate
+      ? 'gate'
+      : loading
+        ? taskStatus === 'cancelling'
+          ? 'cancelling'
+          : 'running'
+        : done
+          ? 'done'
+          : file?.taskActivity?.status === 'cancelled'
+            ? 'cancelled'
+            : file?.taskActivity?.status === 'interrupted'
+              ? 'interrupted'
+              : taskStatus === 'paused'
+                ? 'paused'
+                : taskStatus === 'running'
+                  ? 'queued'
+                  : 'idle';
+  return {
+    state,
+    stage: loading?.key ?? null,
+    labelKey: loading?.labelKey ?? gate?.labelKey,
+  };
 }
 
 // ── 人工检查点（白话：字幕校对 / 配音确认）────────────────────────────────
@@ -238,7 +286,10 @@ export function getFileWarning(file: any, stages: StageDef[]): string {
   for (const stage of stages) {
     if (
       getStageStatus(file, stage.key) === 'done' &&
-      file?.[`${stage.key}Error`]
+      file?.[`${stage.key}Error`] &&
+      // Older records can retain this marker after a successful retry.
+      // A completed stage no longer needs the user to resume it.
+      file[`${stage.key}Error`] !== 'TASK_INTERRUPTED'
     ) {
       return file[`${stage.key}Error`];
     }

@@ -161,8 +161,9 @@ export const isAppleSilicon = () => {
 };
 
 export const getExtraResourcesPath = () => {
-  const isProd = process.env.NODE_ENV === 'production';
-  return isProd
+  // A production renderer can also run from `nextron build --no-pack`.
+  // Only packaged apps have resources copied into Electron's Resources folder.
+  return app.isPackaged
     ? path.join(process.resourcesPath, 'extraResources')
     : path.join(app.getAppPath(), 'extraResources');
 };
@@ -228,8 +229,8 @@ export const defaultUserConfig = {
   model: 'tiny',
   // 默认优先直提媒体内封文本字幕；用户可按任务关闭并强制走 ASR。
   useEmbeddedSubtitles: true,
-  translateProvider: 'baidu',
-  translateContent: 'onlyTranslate',
+  translateProvider: 'autoFree',
+  translateContent: 'sourceAndTranslate',
   maxConcurrentTasks: 1,
   sourceSrtSaveOption: 'noSave',
   targetSrtSaveOption: 'fileNameWithLang',
