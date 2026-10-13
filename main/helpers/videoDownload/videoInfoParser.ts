@@ -3,8 +3,14 @@
  * 使用 yt-dlp 解析链接获取视频元信息和可用格式
  */
 
+import * as path from 'path';
 import { spawn } from 'child_process';
 import { logMessage } from '../storeManager';
+import {
+  isDouyinUrl,
+  extractDouyinId,
+  downloadDouyinVideo,
+} from './douyinDownloader';
 import type {
   DownloadPlatform,
   DownloadVideoInfo,
@@ -15,19 +21,91 @@ import type {
 /**
  * 从 URL 识别平台
  */
+/**
+ * 从抖音分享文本中提取短链接并解析为真实链接
+ * 分享文本示例: "0.56 复制打开抖音，看看【xxx的作品】... https://v.douyin.com/_uM6E95MsT0/ ..."
+ */
+export async function resolveShareLink(input: string): Promise<string> {
+  // Extract URL from share text
+  const urlMatch = input.match(/https?:\/\/v\.douyin\.com\/[\w-]+\/?/i);
+  if (!urlMatch) return input; // No short URL found, return as-is
+
+  const shortUrl = urlMatch[0];
+  logMessage(`[douyin] Resolving share link: ${shortUrl}`, 'info');
+
+  return new Promise<string>((resolve) => {
+    // Follow redirects manually
+    const https = require('https');
+    const http = require('http');
+
+    const followRedirects = (url: string, maxRedirects = 5): void => {
+      if (maxRedirects <= 0) {
+        resolve(url);
+        return;
+      }
+
+      const client = url.startsWith('https') ? https : http;
+      client
+        .get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res: any) => {
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            const nextUrl = res.headers.location.startsWith('http')
+              ? res.headers.location
+              : new URL(res.headers.location, url).href;
+            logMessage(`[douyin] Redirect: ${nextUrl}`, 'info');
+            followRedirects(nextUrl, maxRedirects - 1);
+          } else {
+            resolve(url);
+          }
+        })
+        .on('error', () => resolve(input));
+    };
+
+    followRedirects(shortUrl);
+  });
+}
+
+/**
+ * 检查输入是否为抖音分享文本（包含短链接）
+ */
+export function isDouyinShareText(input: string): boolean {
+  return /https?:\/\/v\.douyin\.com\/[\w-]+\/?/i.test(input);
+}
+export function isXhsShareLink(input: string): boolean {
+  return /https?:\/\/xhslink\.(com|cn)\/[\w-]+\/?/i.test(input);
+}
+
+/**
+ * 解析小红书短链接 (xhslink.cn / xhslink.com) 为真实 URL，
+ * 避免 yt-dlp 直接请求短链接时出现 SSL 错误。
+ */
+
 export function detectPlatform(url: string): DownloadPlatform {
   const lower = url.toLowerCase();
   if (lower.includes('bilibili.com') || lower.includes('b23.tv'))
     return 'bilibili';
   if (lower.includes('youtube.com') || lower.includes('youtu.be'))
     return 'youtube';
-  if (lower.includes('xiaohongshu.com') || lower.includes('xhslink.com'))
+  if (
+    lower.includes('xiaohongshu.com') ||
+    lower.includes('xhslink.com') ||
+    lower.includes('xhslink.cn')
+  )
     return 'xiaohongshu';
   if (
     lower.includes('weixin.qq.com') ||
     lower.includes('channels.weixin.qq.com')
   )
     return 'weixin_video';
+  if (
+    lower.includes('douyin.com') ||
+    lower.includes('iesdouyin.com') ||
+    lower.includes('v.douyin.com')
+  )
+    return 'douyin';
   return 'generic';
 }
 
@@ -117,12 +195,75 @@ function parseVideoData(
  * 需要逐行解析。对于播放列表，取第一条的格式信息，并把所有条目记录为
  * playlistEntries。
  */
+/**
+ * 获取抖音视频信息（使用 Python 脚本）
+ */
+async function getDouyinVideoInfo(
+  url: string,
+  cookieArgs?: CookieArgs,
+): Promise<DownloadVideoInfo> {
+  const { getDouyinVideoInfo: getDouyinInfo } = require('./douyinDownloader');
+
+  logMessage(`[douyin] Parsing via BrowserWindow: ${url}`, 'info');
+
+  const result = await getDouyinInfo(url);
+
+  return {
+    id: result.id,
+    title: result.title || '未知标题',
+    thumbnail: result.thumbnail || null,
+    duration: result.duration || null,
+    uploader: result.uploader || null,
+    uploadDate: null,
+    originalUrl: url,
+    platform: 'douyin',
+    formats: [
+      ...(result.hasVideo
+        ? [
+            {
+              formatId: 'douyin-best',
+              ext: 'mp4',
+              resolution: `${result.width || 0}x${result.height || 0}`,
+              fps: null,
+              vcodec: 'h264',
+              acodec: 'aac',
+              filesize: null,
+              label: '最佳画质',
+              audioOnly: false,
+            },
+          ]
+        : []),
+      {
+        formatId: 'douyin-audio',
+        ext: 'm4a',
+        resolution: 'audio only',
+        fps: null,
+        vcodec: null,
+        acodec: 'aac',
+        filesize: null,
+        label: '仅音频 (M4A)',
+        audioOnly: true,
+      },
+    ],
+    hasSubtitles: false,
+    subtitleLanguages: [],
+    isPlaylist: false,
+    playlistCount: null,
+  };
+}
+
 export async function getVideoInfo(
   url: string,
   ytdlpPath: string,
   cookieArgs?: CookieArgs,
   proxy?: string,
 ): Promise<DownloadVideoInfo> {
+  // Handle Douyin URLs with Python parser
+  if (isDouyinUrl(url)) {
+    logMessage(`[douyin] Using Python parser for: ${url}`, 'info');
+    return getDouyinVideoInfo(url, cookieArgs);
+  }
+
   return new Promise((resolve, reject) => {
     const args = [
       '--dump-json',

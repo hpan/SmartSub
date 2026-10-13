@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { execFile, spawn } from 'child_process';
 import { logMessage } from '../storeManager';
 import type { YtdlpStatus } from '../../../types/videoDownload';
+import { getDownloaderBinaryPath } from '../downloaderManager';
 import { DOWNLOAD_IPC_CHANNELS } from '../../../types/videoDownload';
 import { BrowserWindow } from 'electron';
 
@@ -25,6 +26,10 @@ function getYtdlpDir(): string {
 
 /** 获取 yt-dlp 二进制路径 */
 export function getYtdlpBinaryPath(): string {
+  // Prefer the new downloader manager's binary (newer version)
+  const newPath = getDownloaderBinaryPath('yt-dlp');
+  if (newPath && fs.existsSync(newPath)) return newPath;
+  // Fallback to legacy path
   const dir = getYtdlpDir();
   const platform = process.platform;
   const binaryName = platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';

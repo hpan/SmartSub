@@ -18,7 +18,8 @@
     "translation": "翻译",
     "glossary": "词库",
     "voices": "音色",
-    "settings": "设置"
+    "settings": "设置",
+    "extract": "分离"
   },
   "statusbar": {
     "checking": "检测中",
@@ -406,7 +407,9 @@
     "cloud": "云端听写"
   },
   "videoDownload": "下载",
-  "audioCut": "裁切",
+  "audioCut": "工坊",
+  "audioExtract": "分离",
+  "videoCrop": "裁画",
   "assistant": {
     "title": "AI 助手",
     "new": "新建会话",
@@ -486,5 +489,8 @@
       "unreadable": "无法访问文件，请确认文件仍在本地。",
       "ATTACHMENT_UNSUPPORTED": "不支持此格式。请添加音视频、字幕、TXT／MD 文稿、JSON 文件或图片。"
     }
-  }
+  },
+  "audioCut": "工坊",
+  "audioExtract": "分离",
+  "videoCrop": "裁画"
 }

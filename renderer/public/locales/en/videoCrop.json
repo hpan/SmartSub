@@ -1,0 +1,6 @@
+{
+  "pageTitle": "Crop",
+  "pageDesc": "Crop video frame by aspect ratio with centered crop presets",
+  "dropHere": "Drop video file here",
+  "supportedFormats": "Supports MP4, MKV, AVI, MOV, WebM formats"
+}

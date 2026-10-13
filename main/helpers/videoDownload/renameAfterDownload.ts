@@ -32,9 +32,9 @@ const DEFAULT_PROGRAMS: Record<string, ProgramConfig> = {
   大摩: {
     keywords: ['大摩', '摩根士丹利', 'Morgan Stanley', 'MS'],
     weekdayNames: {
-      0: '大摩宏观策略谈', // 周一
-      2: '大摩周期论剑', // 周三
-      4: '大摩热点前瞻', // 周五
+      1: '大摩宏观策略谈', // 周一
+      3: '大摩周期论剑', // 周三
+      5: '大摩热点前瞻', // 周五
     },
   },
   中金: {
@@ -43,11 +43,11 @@ const DEFAULT_PROGRAMS: Record<string, ProgramConfig> = {
   },
   华创: {
     keywords: ['华创', '华创证券', '张瑜'],
-    nameFormat: '华创宏观{name}',
+    nameFormat: '华创宏观张瑜旬度',
   },
   招商: {
     keywords: ['招商', '招商证券', '张静静'],
-    nameFormat: '招商宏观{name}',
+    nameFormat: '招商宏观周周谈{name}',
   },
   高盛: {
     keywords: ['高盛', 'Goldman Sachs'],
@@ -184,6 +184,12 @@ function cleanTitle(
   sourceName: string,
   programs: Record<string, ProgramConfig>,
 ): string {
+  // 固定栏目名（nameFormat 不含 {name}）整体去掉，如 "华创宏观张瑜旬度"
+  const fixedProg = programs[sourceName];
+  if (fixedProg?.nameFormat && !fixedProg.nameFormat.includes('{name}')) {
+    topic = topic.replace(new RegExp(fixedProg.nameFormat, 'g'), '');
+  }
+
   // 去掉来源关键词
   for (const [, prog] of Object.entries(programs)) {
     for (const kw of prog.keywords) {
@@ -201,8 +207,15 @@ function cleanTitle(
   // 去掉特殊字符
   topic = topic.replace(/[\\/:*?"<>|｜]/g, '').trim();
 
-  // 去掉英文人名（如 "Laura Wang："、"David Li："）
-  topic = topic.replace(/^[A-Z][a-z]+(?:\s[A-Z][a-z]+)+[：:]?\s*/, '');
+  // 去掉主持人/嘉宾人名前缀（如 "刘刚 Kevin："、"邢自强、Laura Wang："）
+  topic = topic.replace(
+    /^[\u4e00-\u9fff]{2,4}[、，,&/ \t]+[A-Za-z]+(?:\s[A-Za-z]+)*[：:]\s*/,
+    '',
+  );
+  // 去掉中文人名+冒号（如 "张瑜："）
+  topic = topic.replace(/^[\u4e00-\u9fff]{2,3}[：:]\s*/, '');
+  // 去掉英文人名（如 "Laura Wang："、"Kevin："）
+  topic = topic.replace(/^[A-Z][a-z]+(?:\s[A-Za-z]+)*[：:]?\s*/, '');
 
   // 去掉标题开头的人名+动词（如 "张瑜最新："）
   topic = topic.replace(
@@ -212,7 +225,10 @@ function cleanTitle(
   topic = topic.replace(/^(最新|独家|深度|重磅|解读|分享)[：:]?\s*/, '');
 
   // 去掉开头的栏目相关词
-  topic = topic.replace(/^(闭门会?|旬度|宏观|策略|研究)[：:]?\s*/, '');
+  topic = topic.replace(
+    /^(闭门会?|旬度|宏观(?:策略谈|策略)?|策略|研究)[：:]\s*/,
+    '',
+  );
 
   // 去掉残留的机构后缀词
   topic = topic.replace(/^(研究|证券|公司)\s*/, '');
@@ -352,9 +368,15 @@ function generateFilename(
   } else if (uploadDate && uploadDate.length >= 8) {
     dateStr = uploadDate.substring(0, 8);
     topic = title;
+    // Calculate weekday from upload date
+    const yy = parseInt(dateStr.substring(0, 4), 10);
+    const mm = parseInt(dateStr.substring(4, 6), 10);
+    const dd = parseInt(dateStr.substring(6, 8), 10);
+    weekday = new Date(yy, mm - 1, dd).getDay();
   } else {
     dateStr = new Date().toISOString().replace(/-/g, '').substring(0, 8);
     topic = title;
+    weekday = new Date().getDay();
   }
 
   // 确定栏目名
@@ -397,6 +419,57 @@ export interface RenameResult {
   newName: string;
 }
 
+/** 判断是否为抖音/小红书等社交平台 */
+function isSocialPlatform(url: string): boolean {
+  const lower = url.toLowerCase();
+  return (
+    lower.includes('douyin.com') ||
+    lower.includes('v.douyin.com') ||
+    lower.includes('xiaohongshu.com') ||
+    lower.includes('xhslink.com') ||
+    lower.includes('xhslink.cn')
+  );
+}
+
+/** 清理文件名中的特殊符号（用于社交平台） */
+function cleanSocialFilename(title: string, ext: string): string {
+  let name = title
+    .replace(/[,，。.、；;：:！!？?]+$/g, '') // 去掉结尾标点
+    .replace(/[,，。.、；;：:！!？?]{2,}/g, '，') // 连续标点合并
+    .replace(/[\/:*?"<>|｜]/g, '') // 去掉文件系统不允许的字符
+    .replace(/\s+/g, ' ') // 多余空格合并
+    .trim();
+  return `${name}.${ext}`;
+}
+
+/** 预览重命名结果（不实际改名） */
+export function previewRename(
+  title: string,
+  uploadDate: string | null,
+  originalUrl: string,
+  originalFilename: string,
+  ext: string,
+): string {
+  const config = readRenameConfig();
+  if (!config.enabled) return `${originalFilename}.${ext}`;
+
+  // 抖音/小红书等社交平台：只清理特殊符号，保持原名
+  if (isSocialPlatform(originalUrl)) {
+    return cleanSocialFilename(title, ext);
+  }
+
+  // B站等机构内容：使用完整重命名规则
+  const sourceName = classifySource(title, config.programs);
+  return generateFilename(
+    title,
+    uploadDate,
+    sourceName,
+    ext,
+    originalFilename,
+    config.programs,
+  );
+}
+
 /**
  * 下载完成后自动重命名文件
  *
@@ -425,22 +498,28 @@ export function renameAfterDownload(
   }
 
   const dir = path.dirname(outputPath);
-  const ext = path.extname(outputPath).substring(1); // 去掉点号
+  const ext = path.extname(outputPath).substring(1);
   const originalFilename = path.basename(outputPath, path.extname(outputPath));
 
-  // 识别来源
-  const sourceName = classifySource(title, config.programs);
-  logMessage(`[rename] 识别来源: ${sourceName}`, 'info');
+  let newName: string;
 
-  // 生成新文件名
-  const newName = generateFilename(
-    title,
-    uploadDate,
-    sourceName,
-    ext,
-    originalFilename,
-    config.programs,
-  );
+  // 抖音/小红书等社交平台：只清理特殊符号
+  if (isSocialPlatform(originalUrl)) {
+    newName = cleanSocialFilename(title, ext);
+    logMessage(`[rename] 社交平台，清理符号: ${newName}`, 'info');
+  } else {
+    // B站等机构内容：使用完整重命名规则
+    const sourceName = classifySource(title, config.programs);
+    logMessage(`[rename] 识别来源: ${sourceName}`, 'info');
+    newName = generateFilename(
+      title,
+      uploadDate,
+      sourceName,
+      ext,
+      originalFilename,
+      config.programs,
+    );
+  }
 
   const newPath = path.join(dir, newName);
 

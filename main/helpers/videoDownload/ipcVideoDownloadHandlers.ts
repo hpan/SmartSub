@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import { logMessage } from '../storeManager';
+import ffmpegStatic from 'ffmpeg-static';
 import {
   DOWNLOAD_IPC_CHANNELS,
   type DownloadTask,
@@ -25,8 +26,20 @@ import {
   getYtdlpBinaryPath,
   isYtdlpInstalled,
 } from './ytdlpManager';
-import { getVideoInfo, detectPlatform } from './videoInfoParser';
+import {
+  getVideoInfo,
+  detectPlatform,
+  resolveShareLink,
+  isDouyinShareText,
+  isXhsShareLink,
+} from './videoInfoParser';
 import { startDownload, cancelDownload } from './downloadExecutor';
+import { isDouyinUrl, downloadDouyinVideo } from './douyinDownloader';
+import {
+  getXhsVideoInfo,
+  downloadXhsVideo,
+  resolveXhsLinkTracked,
+} from './xhsDownloader';
 import {
   isXiaoyuzhouUrl,
   parseXyzEpisode,
@@ -35,6 +48,7 @@ import {
 } from './xyzdlDownloader';
 import {
   renameAfterDownload,
+  previewRename,
   readRenameConfig,
   saveRenameConfig,
 } from './renameAfterDownload';
@@ -208,6 +222,26 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
         const ytdlpPath = await ensureYtdlp(mainWindow);
         const config = readConfig();
 
+        // Auto-resolve Douyin share text to real URL
+        if (isDouyinShareText(url)) {
+          logMessage(
+            `[download] Detected Douyin share text, resolving...`,
+            'info',
+          );
+          url = await resolveShareLink(url);
+          logMessage(`[download] Resolved to: ${url}`, 'info');
+        }
+
+        // Xiaohongshu: use custom downloader (yt-dlp XHS extractor is broken)
+        if (isXhsShareLink(url) || url.includes('xiaohongshu.com')) {
+          logMessage(
+            `[download] Using custom XHS downloader for: ${url}`,
+            'info',
+          );
+          const xhsInfo = await getXhsVideoInfo(url);
+          return { success: true, data: xhsInfo, isXiaoyuzhou: false };
+        }
+
         if (isXiaoyuzhouUrl(url)) {
           const episode = await parseXyzEpisode(url);
           const info: DownloadVideoInfo = {
@@ -252,6 +286,10 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
           cookieArgs,
           config.proxy,
         );
+        logMessage(
+          `[download:main] PARSE_URL platform=${info.platform} title=${info.title?.substring(0, 40)}`,
+          'info',
+        );
         return { success: true, data: info, isXiaoyuzhou: false };
       } catch (error: any) {
         logMessage(`[download] parse URL error: ${error}`, 'error');
@@ -264,11 +302,28 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
     DOWNLOAD_IPC_CHANNELS.PARSE_BATCH,
     async (_event, urls: string[]) => {
       const results = [];
-      for (const url of urls) {
+      for (let url of urls) {
         try {
           const ytdlpPath = await ensureYtdlp(mainWindow);
           const config = readConfig();
           const cookieArgs = resolveCookieArgs(config);
+
+          // Auto-resolve Douyin share text
+          if (isDouyinShareText(url)) {
+            url = await resolveShareLink(url);
+          }
+
+          // Xiaohongshu: use custom downloader
+          if (isXhsShareLink(url) || url.includes('xiaohongshu.com')) {
+            const xhsInfo = await getXhsVideoInfo(url);
+            results.push({
+              url,
+              success: true,
+              data: xhsInfo,
+              isXiaoyuzhou: false,
+            });
+            continue;
+          }
 
           if (isXiaoyuzhouUrl(url)) {
             const episode = await parseXyzEpisode(url);
@@ -328,6 +383,33 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
     },
   );
 
+  // ==================== 文件名预览 ====================
+  ipcMain.handle(
+    'download:previewRename',
+    async (
+      _event,
+      params: {
+        title: string;
+        uploadDate: string | null;
+        originalUrl: string;
+        originalFilename: string;
+        ext: string;
+      },
+    ) => {
+      try {
+        return previewRename(
+          params.title,
+          params.uploadDate,
+          params.originalUrl,
+          params.originalFilename,
+          params.ext,
+        );
+      } catch {
+        return params.originalFilename + '.' + params.ext;
+      }
+    },
+  );
+
   // ==================== 下载任务 ====================
 
   ipcMain.handle(
@@ -340,6 +422,9 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
         id: taskId,
         videoInfo: taskData.videoInfo!,
         selectedFormatId: taskData.selectedFormatId || null,
+        selectedVideoFormatId: taskData.selectedVideoFormatId ?? null,
+        selectedAudioFormatId: taskData.selectedAudioFormatId ?? null,
+        downloadCover: taskData.downloadCover ?? false,
         downloadSubtitles:
           taskData.downloadSubtitles ?? config.downloadSubtitles,
         subtitleLanguages:
@@ -356,8 +441,13 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
         updatedAt: Date.now(),
         isXiaoyuzhou: taskData.isXiaoyuzhou || false,
         xyzEpisodeUrl: taskData.xyzEpisodeUrl,
+        customFilename: taskData.customFilename,
       };
 
+      logMessage(
+        `[download:main] START_DOWNLOAD outputDir=${task.outputDir} platform=${task.videoInfo?.platform} title=${task.videoInfo?.title?.substring(0, 30)}`,
+        'info',
+      );
       downloadTasks.set(taskId, task);
 
       try {
@@ -388,13 +478,252 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
           );
 
           // 重命名
-          const renameResult = renameAfterDownload(
-            outputPath,
-            episode.title,
-            null,
+          let finalPath: string;
+          if (task.customFilename) {
+            const dir = path.dirname(outputPath);
+            const ext = path.extname(outputPath);
+            finalPath = path.join(dir, task.customFilename + ext);
+            if (finalPath !== outputPath) {
+              try {
+                fs.renameSync(outputPath, finalPath);
+              } catch {}
+            }
+          } else {
+            const renameResult = renameAfterDownload(
+              outputPath,
+              episode.title,
+              null,
+              task.videoInfo.originalUrl,
+            );
+            finalPath = renameResult.newPath;
+          }
+
+          task.outputPath = finalPath;
+          task.progress = 100;
+          updateTaskStatus(taskId, 'completed', { outputPath: finalPath });
+          sendToRenderer(DOWNLOAD_IPC_CHANNELS.TASK_COMPLETE, {
+            taskId,
+            outputPath: finalPath,
+          });
+          return { success: true, outputPath: finalPath };
+        }
+
+        // Handle Douyin downloads with native downloader
+        if (isDouyinUrl(task.videoInfo.originalUrl)) {
+          logMessage(`[download] Using Douyin native downloader`, 'info');
+          const outputDir = task.outputDir || config.defaultOutputDir;
+          const cookieArgs = resolveCookieArgs(config);
+          // 抖音需要认证 Cookie，未配置时自动使用 Firefox 作为回退
+          const cookieString =
+            cookieArgs?.cookiesFromBrowser ||
+            cookieArgs?.cookieFile ||
+            'firefox';
+
+          // Check if audio-only download (douyin-audio format or video=none)
+          const isAudioOnly =
+            task.selectedAudioFormatId === 'douyin-audio' ||
+            (task.selectedVideoFormatId === 'none' &&
+              task.selectedAudioFormatId !== 'none');
+
+          const result = await downloadDouyinVideo(
             task.videoInfo.originalUrl,
+            outputDir,
+            cookieString,
+            (progress) => {
+              task.progress = progress.percent;
+              task.speed = progress.speed;
+              task.downloaded = progress.downloaded;
+              sendToRenderer(DOWNLOAD_IPC_CHANNELS.TASK_PROGRESS, {
+                taskId,
+                percent: progress.percent,
+                speed: progress.speed,
+                downloaded: progress.downloaded,
+                totalSize: 0,
+                eta: 0,
+              });
+            },
           );
-          const finalPath = renameResult.newPath;
+
+          if (result.success && result.outputPath) {
+            let finalPath = result.outputPath;
+
+            // If audio-only, detect format and keep as-is if already audio
+            if (isAudioOnly) {
+              const ffmpegPath = ffmpegStatic.path || ffmpegStatic;
+              const { spawn } = require('child_process');
+
+              // Detect actual audio codec of the downloaded file
+              const detectCodec = (): Promise<string> =>
+                new Promise((resolve) => {
+                  const probe = spawn(ffmpegPath, ['-i', result.outputPath]);
+                  let output = '';
+                  probe.stderr.on('data', (d: Buffer) => {
+                    output += d.toString();
+                  });
+                  probe.on('close', () => {
+                    if (output.includes('Audio: mp3')) resolve('mp3');
+                    else if (output.includes('Audio: aac')) resolve('aac');
+                    else if (output.includes('Audio: opus')) resolve('opus');
+                    else resolve('unknown');
+                  });
+                  probe.on('error', () => resolve('unknown'));
+                });
+
+              const codec = await detectCodec();
+              logMessage(`[download] Detected audio codec: ${codec}`, 'info');
+
+              // If already a pure audio file (mp3/opus), just rename the extension
+              if (codec === 'mp3' || codec === 'opus') {
+                const ext = codec === 'mp3' ? '.mp3' : '.opus';
+                const audioPath = result.outputPath.replace(/\.mp4?$/, ext);
+                require('fs').renameSync(result.outputPath, audioPath);
+                finalPath = audioPath;
+                logMessage(
+                  `[download] Audio is already ${codec}, renamed to ${audioPath}`,
+                  'info',
+                );
+              } else {
+                // Video file with audio track — extract to m4a
+                logMessage(`[download] Extracting audio to M4A`, 'info');
+                const audioPath = result.outputPath.replace(/\.mp4?$/, '.m4a');
+
+                await new Promise<void>((resolveAudio, rejectAudio) => {
+                  const ffmpeg = spawn(ffmpegPath, [
+                    '-i',
+                    result.outputPath,
+                    '-vn',
+                    '-acodec',
+                    'aac',
+                    '-b:a',
+                    '192k',
+                    '-y',
+                    audioPath,
+                  ]);
+
+                  let stderr = '';
+                  ffmpeg.stderr.on('data', (data: Buffer) => {
+                    stderr += data.toString();
+                  });
+                  ffmpeg.on('close', (code: number) => {
+                    if (code === 0) {
+                      try {
+                        require('fs').unlinkSync(result.outputPath);
+                      } catch {}
+                      resolveAudio();
+                    } else {
+                      rejectAudio(
+                        new Error(`ffmpeg exited with code ${code}: ${stderr}`),
+                      );
+                    }
+                  });
+                  ffmpeg.on('error', (err: Error) => rejectAudio(err));
+                });
+
+                finalPath = audioPath;
+              }
+            }
+
+            // Apply customFilename if set
+            if (task.customFilename && finalPath) {
+              const dir = path.dirname(finalPath);
+              const ext = path.extname(finalPath);
+              const renamed = path.join(dir, task.customFilename + ext);
+              if (renamed !== finalPath) {
+                try {
+                  fs.renameSync(finalPath, renamed);
+                  finalPath = renamed;
+                } catch {}
+              }
+            }
+
+            task.outputPath = finalPath;
+            task.progress = 100;
+            updateTaskStatus(taskId, 'completed', { outputPath: finalPath });
+            sendToRenderer(DOWNLOAD_IPC_CHANNELS.TASK_COMPLETE, {
+              taskId,
+              outputPath: finalPath,
+            });
+            return { success: true, outputPath: finalPath };
+          } else {
+            throw new Error(result.error || '抖音下载失败');
+          }
+        }
+
+        // Handle Xiaohongshu downloads with custom downloader
+        if (task.videoInfo.platform === 'xiaohongshu') {
+          logMessage(`[download] Using custom XHS downloader`, 'info');
+          const outputDir = task.outputDir || config.defaultOutputDir;
+          const isAudioOnly =
+            task.selectedVideoFormatId === 'none' &&
+            task.selectedAudioFormatId !== 'none';
+
+          const outputPath = await downloadXhsVideo(
+            task.videoInfo,
+            outputDir,
+            false, // always download video first, extract audio after if needed
+            (percent, speed) => {
+              task.progress = percent;
+              task.speed = speed;
+              sendToRenderer(DOWNLOAD_IPC_CHANNELS.TASK_PROGRESS, {
+                taskId,
+                percent,
+                speed,
+                downloaded: 0,
+                totalSize: 0,
+                eta: 0,
+              });
+            },
+          );
+
+          // If audio-only, extract audio with ffmpeg
+          const { spawn } = require('child_process');
+          let finalPath = outputPath;
+          if (isAudioOnly) {
+            const ffmpegPath = ffmpegStatic;
+            const audioPath = outputPath.replace(/\.mp4$/, '.m4a');
+            await new Promise<void>((resolve, reject) => {
+              const proc = spawn(
+                ffmpegPath,
+                ['-i', outputPath, '-vn', '-acodec', 'copy', '-y', audioPath],
+                { windowsHide: true },
+              );
+              proc.on('close', (code: number) => {
+                if (code === 0) {
+                  try {
+                    fs.unlinkSync(outputPath);
+                  } catch {}
+                  finalPath = audioPath;
+                  resolve();
+                } else {
+                  reject(new Error('ffmpeg audio extraction failed'));
+                }
+              });
+              proc.on('error', reject);
+            });
+          }
+
+          // Rename if needed
+          if (task.customFilename) {
+            const ext = isAudioOnly ? 'm4a' : 'mp4';
+            const customPath = path.join(
+              path.dirname(finalPath),
+              `${task.customFilename}.${ext}`,
+            );
+            if (customPath !== finalPath) {
+              try {
+                fs.renameSync(finalPath, customPath);
+                finalPath = customPath;
+              } catch {}
+            }
+          } else {
+            const renameResult = renameAfterDownload(
+              finalPath,
+              task.videoInfo.title,
+              null,
+              task.videoInfo.originalUrl,
+            );
+            finalPath = renameResult.newPath;
+          }
 
           task.outputPath = finalPath;
           task.progress = 100;
@@ -430,13 +759,25 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
           },
           (outputPath) => {
             // 重命名
-            const renameResult = renameAfterDownload(
-              outputPath,
-              task.videoInfo.title,
-              task.videoInfo.uploadDate,
-              task.videoInfo.originalUrl,
-            );
-            const finalPath = renameResult.newPath;
+            let finalPath: string;
+            if (task.customFilename) {
+              const dir = path.dirname(outputPath);
+              const ext = path.extname(outputPath);
+              finalPath = path.join(dir, task.customFilename + ext);
+              if (finalPath !== outputPath) {
+                try {
+                  fs.renameSync(outputPath, finalPath);
+                } catch {}
+              }
+            } else {
+              const renameResult = renameAfterDownload(
+                outputPath,
+                task.videoInfo.title,
+                task.videoInfo.uploadDate,
+                task.videoInfo.originalUrl,
+              );
+              finalPath = renameResult.newPath;
+            }
 
             task.outputPath = finalPath;
             task.progress = 100;
@@ -542,6 +883,49 @@ export function setupVideoDownloadHandlers(mainWindow: BrowserWindow): void {
       return readRenameConfig();
     },
   );
+
+  /** 在音频文件所在目录执行 generate_audio_covers.py 生成封面 */
+  ipcMain.handle(
+    'download:generateCovers',
+    async (_event, filePath: string) => {
+      const dir = path.dirname(filePath);
+      const scriptPath = path.join(dir, 'generate_audio_covers.py');
+      if (!fs.existsSync(scriptPath)) {
+        return {
+          success: false,
+          error: '当前目录下未找到 generate_audio_covers.py',
+        };
+      }
+      const { spawn } = require('child_process');
+      return new Promise((resolve) => {
+        const child = spawn('python3', [scriptPath], {
+          cwd: dir,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (d: Buffer) => {
+          stdout += d.toString();
+        });
+        child.stderr.on('data', (d: Buffer) => {
+          stderr += d.toString();
+        });
+        child.on('close', (code: number) => {
+          logMessage('[generateCovers] stdout: ' + stdout, 'info');
+          if (code !== 0) {
+            logMessage('[generateCovers] stderr: ' + stderr, 'error');
+            resolve({ success: false, error: stderr || '脚本执行失败' });
+          } else {
+            resolve({ success: true, data: stdout });
+          }
+        });
+        child.on('error', (err: Error) => {
+          logMessage('[generateCovers] spawn error: ' + err.message, 'error');
+          resolve({ success: false, error: '无法启动 Python: ' + err.message });
+        });
+      });
+    },
+  );
 }
 
 // 下载封面图
@@ -553,7 +937,13 @@ ipcMain.handle(
       thumbnailUrl,
       outputDir,
       title,
-    }: { thumbnailUrl: string; outputDir: string; title: string },
+      customFilename,
+    }: {
+      thumbnailUrl: string;
+      outputDir: string;
+      title: string;
+      customFilename?: string;
+    },
   ) => {
     try {
       if (!thumbnailUrl) {
@@ -565,13 +955,15 @@ ipcMain.handle(
         fs.mkdirSync(outputDir, { recursive: true });
       }
 
-      // 清理文件名
-      const safeTitle = title.replace(/[\/\\:*?"<>|]/g, '_').substring(0, 150);
-
       // 获取文件扩展名
       const urlPath = new URL(thumbnailUrl).pathname;
       const ext = path.extname(urlPath) || '.jpg';
-      const outputPath = path.join(outputDir, `${safeTitle}_cover${ext}`);
+
+      // 使用自定义文件名或原标题
+      const baseName = customFilename
+        ? customFilename
+        : title.replace(/[\/\\:*?"<>|]/g, '_').substring(0, 150);
+      const outputPath = path.join(outputDir, `${baseName}_cover${ext}`);
 
       logMessage(`[download] downloading thumbnail: ${thumbnailUrl}`, 'info');
       logMessage(`[download] output path: ${outputPath}`, 'info');

@@ -38,7 +38,9 @@ export function subtitleStyleToCSS(
 ): React.CSSProperties {
   const s = scale > 0 ? scale : 1;
   const css: React.CSSProperties = {
-    fontFamily: style.fontName,
+    fontFamily:
+      style.fontName +
+      ', \"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", sans-serif',
     fontSize: `${style.fontSize * s}px`,
     color: style.primaryColor,
     fontWeight: style.bold ? 'bold' : 'normal',

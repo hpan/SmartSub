@@ -1,0 +1,6 @@
+{
+  "pageTitle": "裁画",
+  "pageDesc": "按比例裁剪视频画面，支持多种预设比例居中裁剪",
+  "dropHere": "拖放视频文件到这里",
+  "supportedFormats": "支持 MP4、MKV、AVI、MOV、WebM 等格式"
+}

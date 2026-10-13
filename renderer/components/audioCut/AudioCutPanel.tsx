@@ -11,6 +11,7 @@ import {
   Upload,
   Wand2,
   Play,
+  Music,
   Pause,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -46,8 +47,8 @@ function formatSeconds(s: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
-  const ms = Math.floor((s % 1) * 10);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${ms}`;
+  const ms = Math.floor((s % 1) * 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
 }
 
 function formatTimeShort(s: number): string {
@@ -351,7 +352,13 @@ function WaveformCanvas({
   );
 }
 
-export default function AudioCutPanel() {
+interface AudioCutPanelProps {
+  initialFile?: string;
+}
+
+export default function AudioCutPanel({
+  initialFile,
+}: AudioCutPanelProps = {}) {
   const [audioInfo, setAudioInfo] = useState<AudioInfo | null>(null);
   const [cutPoints, setCutPoints] = useState<string[]>(['']);
   const [cutting, setCutting] = useState(false);
@@ -391,6 +398,13 @@ export default function AudioCutPanel() {
       }
     };
   }, []);
+
+  // Auto-load file from query param (e.g. from download history)
+  useEffect(() => {
+    if (initialFile) {
+      loadFile(initialFile);
+    }
+  }, [initialFile]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadFile = useCallback(
     async (filePath: string) => {
@@ -510,8 +524,15 @@ export default function AudioCutPanel() {
   }, []);
 
   const handleAddPoint = useCallback(() => {
-    setCutPoints((prev) => [...prev, '']);
-  }, []);
+    if (playing && audioRef.current) {
+      // 播放中点击添加切割点，直接取当前播放时间
+      const time = audioRef.current.currentTime;
+      setCutPoints((prev) => [...prev, formatSeconds(time)]);
+      toast.info(`已添加切割点 ${formatSeconds(time)}`);
+    } else {
+      setCutPoints((prev) => [...prev, '']);
+    }
+  }, [playing]);
 
   const handleRemovePoint = useCallback((index: number) => {
     setCutPoints((prev) => prev.filter((_, i) => i !== index));
@@ -526,7 +547,7 @@ export default function AudioCutPanel() {
       return;
     }
     let formatted = '';
-    for (let d = 0; d < Math.min(digits.length, 7); d++) {
+    for (let d = 0; d < Math.min(digits.length, 9); d++) {
       if (d === 2 || d === 4) formatted += ':';
       if (d === 6) formatted += '.';
       formatted += digits[d];
@@ -550,6 +571,12 @@ export default function AudioCutPanel() {
         if (!audioRef.current) {
           // 使用 media:// 协议加载本地文件
           const audioSrc = `media://${audioInfo.path}`;
+          console.log(
+            '[AudioCut] Loading audio:',
+            audioSrc,
+            'exists path:',
+            audioInfo.path,
+          );
 
           audioRef.current = new Audio(audioSrc);
 
@@ -563,8 +590,18 @@ export default function AudioCutPanel() {
           });
 
           audioRef.current.addEventListener('error', (e) => {
-            console.error('Audio error:', e);
-            toast.error('文件加载失败');
+            const audioEl = audioRef.current;
+            const errCode = audioEl?.error?.code;
+            const errMsg = audioEl?.error?.message;
+            console.error('[AudioCut] Audio error:', {
+              code: errCode,
+              message: errMsg,
+              src: audioEl?.src,
+              e,
+            });
+            toast.error(
+              `文件加载失败 (code=${errCode}, ${errMsg || audioInfo.path})`,
+            );
             setPlaying(false);
           });
 
@@ -614,6 +651,60 @@ export default function AudioCutPanel() {
       }
       audioRef.current.currentTime = time;
       setCurrentTime(time);
+    },
+    [audioInfo],
+  );
+
+  // 跳转到切割点并播放
+  const seekAndPlay = useCallback(
+    async (time: number) => {
+      if (!audioRef.current) {
+        if (audioInfo) {
+          const audioSrc = `media://${audioInfo.path}`;
+          audioRef.current = new Audio(audioSrc);
+          audioRef.current.addEventListener('ended', () => {
+            setPlaying(false);
+            setCurrentTime(-1);
+            if (animFrameRef.current)
+              cancelAnimationFrame(animFrameRef.current);
+          });
+          audioRef.current.addEventListener('error', (e) => {
+            const audioEl = audioRef.current;
+            const errCode = audioEl?.error?.code;
+            const errMsg = audioEl?.error?.message;
+            console.error('[AudioCut] Audio error:', {
+              code: errCode,
+              message: errMsg,
+              src: audioEl?.src,
+              e,
+            });
+            toast.error(
+              `文件加载失败 (code=${errCode}, ${errMsg || audioInfo.path})`,
+            );
+            setPlaying(false);
+          });
+          await new Promise((resolve, reject) => {
+            audioRef.current!.addEventListener('canplay', resolve, {
+              once: true,
+            });
+            audioRef.current!.addEventListener('error', reject, { once: true });
+            audioRef.current!.load();
+          });
+        } else {
+          return;
+        }
+      }
+      audioRef.current.currentTime = time;
+      await audioRef.current.play();
+      setPlaying(true);
+      setCurrentTime(time);
+      const updateProgress = () => {
+        if (audioRef.current && !audioRef.current.paused) {
+          setCurrentTime(audioRef.current.currentTime);
+          animFrameRef.current = requestAnimationFrame(updateProgress);
+        }
+      };
+      updateProgress();
     },
     [audioInfo],
   );
@@ -779,11 +870,11 @@ export default function AudioCutPanel() {
           <div className="flex items-center justify-between mb-3">
             <div className="font-medium text-sm">波形（开头/结尾各3分钟）</div>
             <div className="flex items-center gap-2">
-              {/* 播放按钮 */}
+              {/* 播放按钮 - 固定尺寸，不随时间跳动 */}
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 w-8 p-0"
+                className="h-8 w-8 p-0 shrink-0"
                 onClick={togglePlay}
               >
                 {playing ? (
@@ -792,12 +883,10 @@ export default function AudioCutPanel() {
                   <Play className="h-4 w-4" />
                 )}
               </Button>
-              {/* 当前播放时间 */}
-              {currentTime >= 0 && (
-                <span className="text-sm text-muted-foreground min-w-[80px]">
-                  {formatSeconds(currentTime)}
-                </span>
-              )}
+              {/* 当前播放时间 - 固定宽度，始终占位 */}
+              <span className="text-sm text-muted-foreground w-[80px] text-right tabular-nums shrink-0">
+                {currentTime >= 0 ? formatSeconds(currentTime) : '00:00.000'}
+              </span>
             </div>
           </div>
 
@@ -836,11 +925,23 @@ export default function AudioCutPanel() {
                 关键帧: 共 {keyframes.length} 个
               </span>
               <span className="text-yellow-500/70">
-                开头: {keyframes.filter((kf) => kf < checkDuration).map((kf) => formatSeconds(Math.round(kf * 1000) / 1000)).slice(0, 5).join(', ')}
-                {keyframes.filter((kf) => kf < checkDuration).length > 5 ? ' ...' : ''}
+                开头:{' '}
+                {keyframes
+                  .filter((kf) => kf < checkDuration)
+                  .map((kf) => formatSeconds(Math.round(kf * 1000) / 1000))
+                  .slice(0, 5)
+                  .join(', ')}
+                {keyframes.filter((kf) => kf < checkDuration).length > 5
+                  ? ' ...'
+                  : ''}
               </span>
               <span className="text-yellow-500/70">
-                结尾: {keyframes.filter((kf) => kf > audioInfo.duration - checkDuration).map((kf) => formatSeconds(Math.round(kf * 1000) / 1000)).slice(-5).join(', ')}
+                结尾:{' '}
+                {keyframes
+                  .filter((kf) => kf > audioInfo.duration - checkDuration)
+                  .map((kf) => formatSeconds(Math.round(kf * 1000) / 1000))
+                  .slice(-5)
+                  .join(', ')}
               </span>
             </div>
           )}
@@ -895,7 +996,7 @@ export default function AudioCutPanel() {
                 onClick={handleAddPoint}
               >
                 <Plus className="h-3.5 w-3.5" />
-                手动添加
+                添加切割点
               </Button>
             </div>
           </div>
@@ -913,9 +1014,25 @@ export default function AudioCutPanel() {
                   </span>
                   <input
                     type="text"
-                    placeholder="00:00:00.0"
+                    placeholder="00:00:00.000"
                     value={cp}
                     onChange={(e) => handlePointChange(i, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddPoint();
+                        // 光标聚焦到新添加的输入框
+                        setTimeout(() => {
+                          const inputs = (e.target as HTMLElement)
+                            .closest('.flex.flex-col.gap-2')
+                            ?.querySelectorAll('input[type="text"]');
+                          if (inputs && inputs.length > 0)
+                            (
+                              inputs[inputs.length - 1] as HTMLInputElement
+                            ).focus();
+                        }, 50);
+                      }
+                    }}
                     className="flex-1 h-8 px-3 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                   />
                   <Button
@@ -928,6 +1045,27 @@ export default function AudioCutPanel() {
                     }}
                   >
                     跳转
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-primary"
+                    title={playing ? '暂停' : '从此处播放'}
+                    onClick={() => {
+                      if (playing && audioRef.current) {
+                        audioRef.current.pause();
+                        setPlaying(false);
+                      } else {
+                        const t = parseTimeInput(cp);
+                        if (t !== null) seekAndPlay(t);
+                      }
+                    }}
+                  >
+                    {playing ? (
+                      <Pause className="h-3.5 w-3.5" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" />
+                    )}
                   </Button>
                   <Button
                     variant="ghost"
@@ -1006,7 +1144,10 @@ export default function AudioCutPanel() {
             onChange={(e) => setExtractAudio(e.target.checked)}
             className="h-4 w-4 rounded border-gray-300"
           />
-          <label htmlFor="extractAudio" className="text-sm text-muted-foreground cursor-pointer">
+          <label
+            htmlFor="extractAudio"
+            className="text-sm text-muted-foreground cursor-pointer"
+          >
             同时分离音频（从视频中提取 .m4a 音频文件）
           </label>
         </div>
@@ -1017,7 +1158,9 @@ export default function AudioCutPanel() {
         <div className="flex gap-2">
           <Button
             onClick={handleCut}
-            disabled={cutting || extracting || cutPoints.every((c) => !c.trim())}
+            disabled={
+              cutting || extracting || cutPoints.every((c) => !c.trim())
+            }
             className="flex-1 gap-2"
           >
             {cutting ? (
@@ -1043,7 +1186,7 @@ export default function AudioCutPanel() {
               {extracting ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <FileAudio className="h-4 w-4" />
+                <Music className="h-4 w-4" />
               )}
               仅分离音频
             </Button>

@@ -27,3 +27,5 @@ extraResources/sherpa/native/
 
 # Local Python speech review test caches
 __pycache__/
+tools/douyin-dl/douyin-downloader
+main/helpers/audioVisualize/ipcAudioVisualizeHandlers.ts.bak

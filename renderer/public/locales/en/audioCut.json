@@ -1,4 +1,10 @@
 {
-  "pageTitle": "Cut",
-  "pageDesc": "Select an audio or video file and split it into segments at specified time points"
+  "pageTitle": "Workshop",
+  "pageDesc": "Audio trimming, extraction, watermark scrubbing, speed change, video cropping and trimming",
+  "tabCut": "Trim",
+  "tabExtract": "Extract",
+  "tabScrub": "Scrub",
+  "tabVideoCrop": "Video Crop",
+  "tabVideoTrim": "Clip",
+  "tabSpeed": "Speed"
 }

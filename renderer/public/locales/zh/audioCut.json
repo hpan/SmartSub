@@ -1,4 +1,10 @@
 {
-  "pageTitle": "裁切",
-  "pageDesc": "选择音视频文件，在指定时间点切割成多个片段"
+  "pageTitle": "工坊",
+  "pageDesc": "音频裁割、分离、祛印、变速及视频裁切、裁片等处理",
+  "tabCut": "裁割",
+  "tabExtract": "分离",
+  "tabScrub": "祛印",
+  "tabVideoCrop": "裁画",
+  "tabVideoTrim": "裁片",
+  "tabSpeed": "变速"
 }

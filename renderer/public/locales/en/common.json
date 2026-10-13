@@ -18,7 +18,8 @@
     "translation": "Translate",
     "glossary": "Terms",
     "voices": "Voices",
-    "settings": "Settings"
+    "settings": "Settings",
+    "extract": "Extract"
   },
   "statusbar": {
     "checking": "Checking",
@@ -406,7 +407,9 @@
     "cloud": "Cloud ASR"
   },
   "videoDownload": "Download",
-  "audioCut": "Cut",
+  "audioCut": "Workshop",
+  "audioExtract": "Extract",
+  "videoCrop": "Crop",
   "assistant": {
     "title": "AI assistant",
     "new": "New conversation",

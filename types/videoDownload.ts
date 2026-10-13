@@ -6,6 +6,7 @@
 export type DownloadPlatform =
   | 'bilibili'
   | 'youtube'
+  | 'douyin'
   | 'xiaohongshu'
   | 'xiaoyuzhou'
   | 'weixin_video'
@@ -75,14 +76,21 @@ export interface DownloadTask {
   id: string;
   /** 视频信息 */
   videoInfo: DownloadVideoInfo;
-  /** 选择的格式 ID */
-  selectedFormatId: string | null;
+  /** 选择的格式 ID (legacy, kept for compatibility) */
+  selectedFormatId?: string | null;
+  /** 选择的视频格式 ID */
+  selectedVideoFormatId?: string | null;
+  /** 选择的音频格式 ID */
+  selectedAudioFormatId?: string | null;
+  /** 是否下载封面图 */
+  downloadCover?: boolean;
   /** 是否同时下载字幕 */
   downloadSubtitles: boolean;
   /** 选择的字幕语言 */
   subtitleLanguages: string[];
   /** 保存目录 */
   outputDir: string;
+  customFilename?: string;
   /** 下载状态 */
   status: DownloadTaskStatus;
   /** 下载进度 0-100 */
@@ -209,4 +217,4 @@ export const DOWNLOAD_IPC_CHANNELS = {
   // 重命名规则
   GET_RENAME_CONFIG: 'download:getRenameConfig',
   SAVE_RENAME_CONFIG: 'download:saveRenameConfig',
-} as const;
+};

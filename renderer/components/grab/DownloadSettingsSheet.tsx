@@ -308,12 +308,13 @@ export function DownloadSettingsSheet({
               <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-200">
                 ✅ 使用前请确保 Edge 已登录目标网站，yt-dlp 会自动读取浏览器
                 Cookie。
-                {currentCookieMode === 'from-browser-chrome' && (
-                  <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-200">
-                    ✅ 使用前请确保 Chrome 已登录目标网站（如
-                    X、YouTube），yt-dlp 会自动读取浏览器 Cookie。
-                  </div>
-                )}
+              </div>
+            )}
+
+            {currentCookieMode === 'from-browser-chrome' && (
+              <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-800 dark:border-green-800 dark:bg-green-950/30 dark:text-green-200">
+                ✅ 使用前请确保 Chrome 已登录目标网站（如 X、YouTube），yt-dlp
+                会自动读取浏览器 Cookie。
               </div>
             )}
           </div>

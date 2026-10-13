@@ -135,10 +135,18 @@ export async function startDownload(
   const {
     videoInfo,
     selectedFormatId,
+    selectedVideoFormatId,
+    selectedAudioFormatId,
     downloadSubtitles,
     subtitleLanguages,
     outputDir,
   } = task;
+
+  // Determine effective format: prefer new fields, fall back to legacy
+  const effectiveVideoFormatId =
+    selectedVideoFormatId ?? selectedFormatId ?? null;
+  const isAudioOnly =
+    selectedVideoFormatId === 'none' && selectedAudioFormatId !== 'none';
 
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
@@ -154,11 +162,16 @@ export async function startDownload(
     '--no-check-certificates',
     '--newline',
     '--progress',
-    '--merge-output-format',
-    'mp4',
     '-o',
     outputTemplate,
   ];
+
+  // Audio-only: extract audio; Video: merge format
+  if (isAudioOnly) {
+    args.push('--extract-audio', '--audio-format', 'm4a');
+  } else {
+    args.push('--merge-output-format', 'mp4');
+  }
 
   // ffmpeg 路径
   const ffmpegPath = getFfmpegPath();
@@ -174,9 +187,26 @@ export async function startDownload(
   }
 
   // 格式选择
-  const formatArg = buildFormatArg(selectedFormatId, videoInfo.formats);
+  logMessage(
+    `[download] task selectedVideoFormatId: ${selectedVideoFormatId}, selectedAudioFormatId: ${selectedAudioFormatId}, effectiveVideoFormatId: ${effectiveVideoFormatId}`,
+    'info',
+  );
+  let formatArg: string;
+  if (isAudioOnly) {
+    // Audio-only download
+    formatArg =
+      selectedAudioFormatId === 'bestaudio' || !selectedAudioFormatId
+        ? 'bestaudio/best'
+        : selectedAudioFormatId;
+  } else {
+    // Video download (with audio merged)
+    formatArg = buildFormatArg(effectiveVideoFormatId, videoInfo.formats);
+  }
   args.push('-f', formatArg);
-  logMessage(`[download] format arg: ${formatArg}`, 'info');
+  logMessage(
+    `[download] format arg: ${formatArg}, isAudioOnly: ${isAudioOnly}`,
+    'info',
+  );
 
   // 是否为双流下载（需要合并）
   const isDualStream = formatArg.includes('+bestaudio');

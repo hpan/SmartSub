@@ -15,7 +15,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 import path from 'path';
-import { app, dialog, protocol } from 'electron';
+import { app, dialog, protocol, net } from 'electron';
 import serve from 'electron-serve';
 import { createWindow } from './helpers/create-window';
 import { setupIpcHandlers } from './helpers/ipcHandlers';
@@ -41,7 +41,14 @@ import { setupParameterHandlers } from './helpers/ipcParameterHandlers';
 import { setupProofreadHandlers } from './helpers/ipcProofreadHandlers';
 import { setupSubtitleMergeHandlers } from './helpers/ipcSubtitleMergeHandlers';
 import { setupAudioCutHandlers } from './helpers/ipcAudioCutHandlers';
-import { setupVideoDownloadHandlers } from './helpers/videoDownload/ipcVideoDownloadHandlers';
+import { setupVideoCropHandlers } from './helpers/ipcVideoCropHandlers';
+import { setupVideoTrimHandlers } from './helpers/ipcVideoTrimHandlers';
+import { setupSpeedHandlers } from './helpers/ipcSpeedHandlers';
+import { setupVideoDownloadHandlers as setupGrabHandlers } from './helpers/videoDownload/ipcVideoDownloadHandlers';
+import { registerAudioVisualizeHandlers } from './helpers/audioVisualize/ipcAudioVisualizeHandlers';
+import { setupScrubHandlers } from './helpers/watermarkScrub/ipcScrubHandlers';
+import { registerIMAHandlers } from './helpers/imaUploader';
+import { registerWorkspaceHandlers } from './helpers/workspace';
 import { setupDubbingHandlers } from './helpers/ipcDubbingHandlers';
 import { setupPipelineHandlers } from './helpers/ipcPipelineHandlers';
 import { setupVoiceCloneHandlers } from './helpers/ipcVoiceCloneHandlers';
@@ -201,16 +208,66 @@ app.on('before-quit', (event) => {
   }
 
   // 注册自定义协议处理本地媒体文件
-  protocol.registerFileProtocol('media', (request, callback) => {
-    // 查询串仅作回放缓存击穿用（配音行重合成后同名 wav 内容已变，
-    // Chromium 会按 URL 缓存媒体响应），取文件路径前剥离。
-    const url = request.url.substr(8).split('?')[0]; // 移除 "media://" 部分
+  // 注意：registerSchemesAsPrivileged 设置了 supportFetchAPI:true，
+  // Chromium 的 <audio>/<video> 会用 Fetch API 发请求，
+  // 必须用 protocol.handle（返回 Response）而非 registerFileProtocol（回调 API）。
+  const fsSync = require('fs');
+  protocol.handle('media', (request) => {
+    const url = new URL(request.url);
+    // 文件名可能含字面 % 字符，浏览器编码后留下裸 % 导致 decodeURIComponent 抛异常
+    const safePathname = url.pathname.replace(/%(?![0-9A-Fa-f]{2})/g, '%25');
+    const filePath = decodeURIComponent(safePathname);
     try {
-      const decodedUrl = decodeURIComponent(url);
-      return callback({ path: decodedUrl });
-    } catch (error) {
-      console.error('Protocol handler error:', error);
-      return callback({ error: -2 });
+      const stat = fsSync.statSync(filePath);
+      const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
+      const mimeMap: Record<string, string> = {
+        '.mp3': 'audio/mpeg',
+        '.m4a': 'audio/mp4',
+        '.wav': 'audio/wav',
+        '.ogg': 'audio/ogg',
+        '.flac': 'audio/flac',
+        '.aac': 'audio/aac',
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+      };
+      const mime = mimeMap[ext] || 'application/octet-stream';
+      const headers: Record<string, string> = {
+        'Content-Type': mime,
+        'Accept-Ranges': 'bytes',
+      };
+      // 支持 Range 请求（音频 seek 需要）
+      const range = request.headers.get('range');
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+        const chunkSize = end - start + 1;
+        const buf = Buffer.alloc(chunkSize);
+        const fd = fsSync.openSync(filePath, 'r');
+        fsSync.readSync(fd, buf, 0, chunkSize, start);
+        fsSync.closeSync(fd);
+        headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+        headers['Content-Length'] = String(chunkSize);
+        return new Response(buf, { status: 206, headers });
+      }
+      // 全量返回
+      const data = fsSync.readFileSync(filePath);
+      headers['Content-Length'] = String(stat.size);
+      return new Response(data, { headers });
+    } catch (error: any) {
+      console.error(
+        '[media-protocol] error:',
+        error.message,
+        'path:',
+        filePath,
+      );
+      return new Response(null, { status: 404 });
     }
   });
 
@@ -294,9 +351,18 @@ app.on('before-quit', (event) => {
   setupRecipeHandlers();
   setupGlossaryHandlers(mainWindow);
   setupTaskManager();
-  setupAutoUpdater(mainWindow);
   setupSubtitleMergeHandlers(mainWindow, rendererUrl);
   setupAudioCutHandlers(mainWindow);
+  setupVideoCropHandlers(mainWindow);
+  setupVideoTrimHandlers(mainWindow);
+  setupSpeedHandlers(mainWindow);
+  setupGrabHandlers(mainWindow);
+  registerAudioVisualizeHandlers(mainWindow);
+  setupScrubHandlers(mainWindow);
+
+  registerIMAHandlers();
+  registerWorkspaceHandlers();
+
   setupDubbingHandlers(mainWindow);
   setupPipelineHandlers(mainWindow);
   setupVoiceCloneHandlers(mainWindow);

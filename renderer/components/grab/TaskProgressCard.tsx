@@ -14,6 +14,11 @@ import {
   Clock,
   Music,
   FileVideo,
+  Scissors,
+  Image as ImageIcon,
+  Upload,
+  Link,
+  RotateCw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -26,6 +31,13 @@ interface Props {
   onCancel: () => void;
   onClear: () => void;
   onShowInFolder: () => void;
+  onOpenFile?: () => void;
+  onRecognizeSubtitle?: () => void;
+  onAudioVisualize?: () => void;
+  onAudioCut?: () => void;
+  onGenerateCovers?: () => void;
+  onUploadIMA?: () => void;
+  onRetry?: () => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -73,8 +85,15 @@ export function TaskProgressCard({
   onCancel,
   onClear,
   onShowInFolder,
+  onOpenFile,
+  onRecognizeSubtitle,
+  onAudioVisualize,
+  onAudioCut,
+  onGenerateCovers,
+  onUploadIMA,
+  onRetry,
 }: Props) {
-  const { t } = useTranslation('download');
+  const { t } = useTranslation('grab');
   const statusCfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
   const StatusIcon = statusCfg.icon;
   const isActive =
@@ -111,14 +130,48 @@ export function TaskProgressCard({
           )}
         </div>
 
-        {/* 标题 */}
+        {/* 标题 + 作者 + 时间 */}
         <div className="min-w-0 flex-1">
-          <p className="line-clamp-1 text-sm font-medium">
-            {task.videoInfo.title}
+          <p className="text-sm font-medium leading-tight truncate">
+            <span>
+              {task.videoInfo.title.length > 50
+                ? task.videoInfo.title.slice(0, 50) + '...'
+                : task.videoInfo.title}
+            </span>
+            {task.videoInfo.uploader && (
+              <span className="ml-2 text-xs text-muted-foreground font-normal">
+                {task.videoInfo.uploader}
+              </span>
+            )}
+            {(task.updatedAt || task.createdAt) > 0 && (
+              <span className="ml-2 text-[11px] text-muted-foreground font-normal">
+                {new Date(task.updatedAt || task.createdAt).toLocaleString(
+                  'zh-CN',
+                  {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false,
+                  },
+                )}
+              </span>
+            )}
+            {task.videoInfo.originalUrl && (
+              <span
+                className="ml-1.5 inline-flex items-center cursor-pointer text-muted-foreground hover:text-foreground"
+                title="复制原链接"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard.writeText(task.videoInfo.originalUrl);
+                }}
+              >
+                <Link className="h-3 w-3" />
+              </span>
+            )}
           </p>
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
-            {task.videoInfo.uploader && <span>{task.videoInfo.uploader}</span>}
-          </div>
         </div>
 
         {/* 状态 */}
@@ -149,6 +202,17 @@ export function TaskProgressCard({
               onClick={onCancel}
             >
               <X className="h-3 w-3" />
+            </Button>
+          )}
+          {isFailed && onRetry && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              onClick={onRetry}
+              title="重试下载"
+            >
+              <RotateCw className="h-3 w-3" />
             </Button>
           )}
           {(isCompleted || isFailed || task.status === 'cancelled') && (
@@ -208,20 +272,83 @@ export function TaskProgressCard({
 
       {/* 完成信息 */}
       {isCompleted && task.outputPath && (
-        <div className="flex items-center gap-2">
-          <p className="min-w-0 flex-1 truncate text-xs text-green-600 dark:text-green-400">
-            {task.outputPath}
-          </p>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 shrink-0 px-2 text-xs"
-            onClick={onShowInFolder}
-          >
-            <FolderOpen className="mr-1 h-3 w-3" />
-            打开目录
-          </Button>
-        </div>
+        <>
+          <div className="flex items-center gap-2">
+            <p className="min-w-0 flex-1 truncate text-xs text-green-600 dark:text-green-400">
+              {task.outputPath}
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {onOpenFile && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={onOpenFile}
+              >
+                打开文件
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={onShowInFolder}
+            >
+              <FolderOpen className="mr-1 h-3 w-3" /> 打开目录
+            </Button>
+            {onRecognizeSubtitle && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={onRecognizeSubtitle}
+              >
+                识别字幕
+              </Button>
+            )}
+            {onAudioVisualize && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={onAudioVisualize}
+              >
+                音画
+              </Button>
+            )}
+            {onAudioCut && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={onAudioCut}
+              >
+                <Scissors className="mr-1 h-3 w-3" /> 裁割
+              </Button>
+            )}
+            {onGenerateCovers && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={onGenerateCovers}
+              >
+                <ImageIcon className="mr-1 h-3 w-3" /> 生成封面
+              </Button>
+            )}
+            {onUploadIMA && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={onUploadIMA}
+              >
+                <Upload className="mr-1 h-3 w-3" /> 上传 IMA
+              </Button>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
