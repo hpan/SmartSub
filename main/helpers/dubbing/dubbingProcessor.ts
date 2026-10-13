@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { parseDubbingCueEdits } from '../../../types/dubbingCueDraft';
+import { writableComposeExtension } from '../../../types/composeContainer';
 import { logMessage } from '../storeManager';
 import { ensureTempDir } from '../fileUtils';
 import { TaskCancelledError } from '../taskContext';
@@ -15,7 +16,10 @@ import {
   deleteSessionData,
   resolvePersistedCue,
 } from './sessionStore';
-import type { DubbingSessionMeta } from '../../../types/dubbing';
+import type {
+  BilingualCueDisplay,
+  DubbingSessionMeta,
+} from '../../../types/dubbing';
 import {
   parseSubtitleCues,
   detectSubtitleFormat,
@@ -91,7 +95,11 @@ import { getSherpaTtsRuntime } from '../sherpaOnnx/ttsRuntime';
 import { getTtsProviderById } from '../ttsProviderManager';
 import { synthesizeSegment } from '../../service/tts';
 import { getCloudProviderGate } from '../engines/cloudProviderGate';
-import { loadDubbingSpeakerMetadata } from './speakerMetadata';
+import {
+  findDubbingProofreadDataFile,
+  loadDubbingSpeakerMetadata,
+} from './speakerMetadata';
+import { composeDisplayText, resolveDubbingScript } from './bilingualScript';
 import {
   cueInheritsSpeaker,
   dubbingVoiceNeedsUpdate,
@@ -118,6 +126,8 @@ export interface SessionCue {
   startMs: number;
   endMs: number;
   text: string;
+  /** 双语交付字幕的版面：text 只含译文，导出的顺延字幕据此保留原文行。 */
+  display?: BilingualCueDisplay;
   voiceId?: string;
   speakerIds?: number[];
   primarySpeakerId?: number;
@@ -288,6 +298,7 @@ function toSessionMeta(session: DubbingSession): DubbingSessionMeta {
       startMs: c.startMs,
       endMs: c.endMs,
       text: c.text,
+      display: c.display,
       voiceId: c.voiceId,
       speakerIds: c.speakerIds,
       primarySpeakerId: c.primarySpeakerId,
@@ -335,11 +346,26 @@ export async function createDubbingSession(
     throw new Error('字幕文件为空或无法解析');
   }
   const mediaDurationMs = videoPath ? await probeMediaDurationMs(videoPath) : 0;
+  const sidecar = findDubbingProofreadDataFile(subtitlePath, proofreadDataFile);
   const speakerMetadata = loadDubbingSpeakerMetadata(
     subtitlePath,
     parsed,
     proofreadDataFile,
+    sidecar,
   );
+  // 双语交付字幕只念译文行；与流水线重建纯译文字幕的结果一致（issue #537）。
+  const script = resolveDubbingScript(subtitlePath, parsed, sidecar?.data);
+  if (script.unresolved.length) {
+    logMessage(
+      `dubbing: ${script.unresolved.length}/${parsed.length} cues of ${path.basename(subtitlePath)} are bilingual but their translation line was not found, so the whole text is dubbed`,
+      'warning',
+    );
+  }
+  // 只有真正定位到译文行时，才把 sidecar 的目标语言当作配音语言。
+  const scriptLanguage =
+    script.bilingual && script.unresolved.length < parsed.length
+      ? script.targetLanguage
+      : undefined;
 
   const id = randomUUID();
   // 持久会话目录（应用数据目录下）：dispose 不删除，重开可恢复
@@ -353,9 +379,10 @@ export async function createDubbingSession(
     subtitleHash: hashSubtitleContent(content),
     subtitleLanguage:
       subtitleLanguage ??
+      scriptLanguage ??
       dubbingSubtitleLanguage(subtitlePath, proofreadDataFile),
     detectedLanguage: detectDubbingLanguage(
-      parsed.map((c) => c.text).join('\n'),
+      script.cues.map((c) => c.text).join('\n'),
     ),
     videoPath,
     mediaDurationMs,
@@ -373,7 +400,10 @@ export async function createDubbingSession(
         index,
         startMs: c.startMs,
         endMs: c.endMs,
-        text: c.text.replace(/\n+/g, ' ').trim(),
+        text: script.cues[index].text,
+        ...(script.cues[index].display
+          ? { display: script.cues[index].display }
+          : {}),
         ...(Object.prototype.hasOwnProperty.call(assignment, 'speakerIds')
           ? { speakerIds: [...(assignment.speakerIds || [])] }
           : {}),
@@ -578,6 +608,7 @@ export function restoreDubbingSession(
         startMs: resolved.startMs,
         endMs: resolved.endMs,
         text: resolved.text,
+        ...(resolved.display ? { display: resolved.display } : {}),
         voiceId: resolved.voiceId,
         ...(Object.prototype.hasOwnProperty.call(assignment, 'speakerIds')
           ? { speakerIds: [...(assignment.speakerIds || [])] }
@@ -1685,7 +1716,8 @@ interface DubTrackOptions {
    * 顺延字幕输出：always=只要请求就写（工作台导出语义）；
    * ifShifted=仅当规划实际改变了时间轴才写（流水线语义）。
    * displayTextByIndex=展示文本覆盖（cue index → 文本）：流水线用交付字幕
-   * 文本（如双语）替换配音用的纯译文，时间轴仍取规划结果；缺省用会话行文本。
+   * 文本（如双语）替换配音用的纯译文，工作台对双语字幕也这样做（见
+   * bilingualScript.composeDisplayText），时间轴仍取规划结果；缺省用会话行文本。
    */
   shiftedSubtitle?: {
     path?: string;
@@ -1895,6 +1927,12 @@ export async function exportDubbing(
         ? {
             path: path.join(output.directory, 'aligned.srt'),
             mode: 'always',
+            // 双语交付字幕：配音只念译文，对齐后的字幕仍保留原文行（#537）
+            displayTextByIndex: new Map(
+              session.cues
+                .filter((cue) => cue.display)
+                .map((cue) => [cue.index, composeDisplayText(cue)] as const),
+            ),
           }
         : undefined,
     });
@@ -1995,7 +2033,8 @@ function resolveOutputPath(
         : '.wav'
       : config.output === 'addTrack'
         ? '.mkv'
-        : path.extname(session.videoPath!) || '.mp4';
+        : // 沿用源容器；WebM/Ogg 写不下配音的 AAC，回落 MP4（#521）
+          writableComposeExtension(path.extname(session.videoPath!) || '.mp4');
   return path.join(dir, `${stem}-dubbed${ext}`);
 }
 

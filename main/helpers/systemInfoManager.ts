@@ -7,7 +7,7 @@ import { getModelsInstalled, getPath, deleteModel } from './whisper';
 import {
   getFasterWhisperModelsInstalled,
   getFasterWhisperModelsPath,
-  toCt2CacheDirName,
+  getCt2ModelCacheDir,
 } from './modelCatalog';
 import {
   validateModelLayout,
@@ -34,6 +34,7 @@ import {
   getCt2ProgressKey,
   getFasterWhisperModelDownloader,
   deleteCt2Model,
+  getCt2DeleteTargets,
 } from './fasterWhisperModelDownloader';
 import {
   getFunasrModelDownloader,
@@ -175,7 +176,8 @@ function validateImportLayout(
 /**
  * 解析「从文件夹导入」的校验集与目的地（按指定引擎+模型槽消歧）。
  * - sherpa ASR 引擎：落 `<engine root>/<dirName>`，校验集取 catalog requiredFiles；
- * - fasterWhisper：落合成快照目录，使 resolveCt2ModelSnapshotDir 命中，校验集为 CT2 关键文件。
+ * - fasterWhisper：落合成快照目录，使 resolveCt2ModelSnapshotDir 命中，校验集为 CT2 关键文件；
+ *   与下载一致落在 `<模型路径>/hub/` 下，不在用户的模型路径根上新增 models--*（#519）。
  * 返回 null 表示模型 id 非法/缺失。
  */
 function resolveImportPlan(
@@ -220,8 +222,7 @@ function resolveImportPlan(
     return {
       requiredFiles: CT2_REQUIRED_FILES,
       destDir: path.join(
-        getFasterWhisperModelsPath(),
-        toCt2CacheDirName(modelId),
+        getCt2ModelCacheDir(modelId),
         'snapshots',
         CT2_IMPORT_SNAPSHOT_REV,
       ),
@@ -425,6 +426,11 @@ export function setupSystemInfoManager(mainWindow: BrowserWindow) {
     await deleteModel(modelName?.toLowerCase());
     return true;
   });
+
+  // 删除确认框的预览：只读，列出 deleteCt2Model 将删除的目录。
+  ipcMain.handle('getCt2DeleteTargets', (_event, modelId) =>
+    getCt2DeleteTargets(modelId),
+  );
 
   ipcMain.handle('deleteCt2Model', async (_event, modelId) => {
     deleteCt2Model(modelId);

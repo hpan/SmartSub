@@ -251,6 +251,71 @@ export function normalizeSpeakerRoster(
   return roster;
 }
 
+interface TimedCueLike {
+  id?: unknown;
+  startMs?: unknown;
+  endMs?: unknown;
+}
+
+interface RawCue extends TimedCueLike {
+  source?: unknown;
+  target?: unknown;
+  speakerIds?: unknown;
+  primarySpeakerId?: unknown;
+}
+
+function isCueTime(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value);
+}
+
+/** Longest value copied into an error message, so a garbage field cannot flood the log. */
+const MAX_PREVIEW_LENGTH = 40;
+
+function previewValue(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? String(value);
+  } catch {
+    text = Object.prototype.toString.call(value);
+  }
+  return text.length > MAX_PREVIEW_LENGTH
+    ? `${text.slice(0, MAX_PREVIEW_LENGTH - 3)}...`
+    : text;
+}
+
+/** "#3 (id=3, startMs=5200, endMs=5200)": enough to find the cue in the file. */
+function describeCue(input: unknown, index: number): string {
+  const position = `#${index + 1}`;
+  if (!input || typeof input !== 'object')
+    return `${position} (${previewValue(input)})`;
+  const cue = input as TimedCueLike;
+  return `${position} (id=${String(cue.id || index + 1)}, startMs=${previewValue(cue.startMs)}, endMs=${previewValue(cue.endMs)})`;
+}
+
+/** The first rule a persisted cue breaks, or undefined when it holds them all. */
+function cueProblem(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return 'not an object';
+  const cue = input as RawCue;
+  if (!isCueTime(cue.startMs)) return 'startMs is not an integer';
+  if (!isCueTime(cue.endMs)) return 'endMs is not an integer';
+  if (cue.startMs < 0) return 'startMs is negative';
+  if (cue.endMs <= cue.startMs) return 'endMs is not after startMs';
+  if (typeof cue.source !== 'string') return 'source is not text';
+  if (cue.target !== undefined && typeof cue.target !== 'string')
+    return 'target is not text';
+  if (
+    cue.speakerIds !== undefined &&
+    (!Array.isArray(cue.speakerIds) || !cue.speakerIds.every(isValidSpeakerId))
+  )
+    return 'speakerIds is invalid';
+  if (
+    cue.primarySpeakerId !== undefined &&
+    !isValidSpeakerId(cue.primarySpeakerId)
+  )
+    return 'primarySpeakerId is invalid';
+  return undefined;
+}
+
 /** Editing must reject corrupted persisted values before normalization repairs them. */
 export function assertValidProofreadData(input: unknown): void {
   if (!input || typeof input !== 'object' || Array.isArray(input))
@@ -258,23 +323,12 @@ export function assertValidProofreadData(input: unknown): void {
   const raw = input as ProofreadDataFileInput;
   if ((raw.version !== 1 && raw.version !== 2) || !Array.isArray(raw.cues))
     throw new Error('Unsupported proofread data version');
-  for (const cue of raw.cues) {
-    if (
-      !cue ||
-      typeof cue !== 'object' ||
-      !Number.isSafeInteger(cue.startMs) ||
-      !Number.isSafeInteger(cue.endMs) ||
-      cue.startMs < 0 ||
-      cue.endMs <= cue.startMs ||
-      typeof cue.source !== 'string' ||
-      (cue.target !== undefined && typeof cue.target !== 'string') ||
-      (cue.speakerIds !== undefined &&
-        (!Array.isArray(cue.speakerIds) ||
-          !cue.speakerIds.every(isValidSpeakerId))) ||
-      (cue.primarySpeakerId !== undefined &&
-        !isValidSpeakerId(cue.primarySpeakerId))
-    )
-      throw new Error('Invalid proofread cue');
+  for (let index = 0; index < raw.cues.length; index++) {
+    const problem = cueProblem(raw.cues[index]);
+    if (problem)
+      throw new Error(
+        `Invalid proofread cue ${describeCue(raw.cues[index], index)}: ${problem}`,
+      );
   }
   if (raw.version === 2 && raw.speakers !== undefined) {
     const seen = new Set<number>();
@@ -292,6 +346,101 @@ export function assertValidProofreadData(input: unknown): void {
       seen.add(speaker.id);
     }
   }
+}
+
+/** Display time given to a cue whose end was not after its start (the engines' 0.8 s minimum). */
+export const REPAIRED_CUE_DURATION_MS = 800;
+/** Silence kept before the next cue, like the engines' 0.1 s guard gap. */
+export const REPAIRED_CUE_GUARD_MS = 100;
+
+export interface CueTimingRepair {
+  /** Zero-based position in the cue array. */
+  index: number;
+  id: string;
+  startMs: number;
+  /** End time found in the data (not after `startMs`). */
+  endMs: number;
+  repairedEndMs: number;
+}
+
+/** First start strictly after `startMs` in an ascending list, if any. */
+function nextStartAfter(
+  sortedStarts: readonly number[],
+  startMs: number,
+): number | undefined {
+  let low = 0;
+  let high = sortedStarts.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (sortedStarts[mid] <= startMs) low = mid + 1;
+    else high = mid;
+  }
+  return low < sortedStarts.length ? sortedStarts[low] : undefined;
+}
+
+/**
+ * `assertValidProofreadData` requires `endMs > startMs`, yet ASR and
+ * segmentation can emit zero-length (or inverted) cues. Dropping them would
+ * lose text and refusing the whole file would lock the user out of the very
+ * panel meant to fix them, so such a cue keeps its start and gets a visible
+ * duration: `min(start + 800 ms, next distinct start - 100 ms)`, or exactly the
+ * next start when that leaves no room. It never overlaps a later cue.
+ *
+ * Only plain non-negative integer ranges are touched; any other corruption is
+ * returned as-is for the strict validation to reject. Pure (inputs are never
+ * mutated, unchanged cues are returned as the same objects) and idempotent.
+ */
+export function repairNonPositiveCueDurations<T>(cues: readonly T[]): {
+  cues: T[];
+  repairs: CueTimingRepair[];
+} {
+  const starts: number[] = [];
+  for (let index = 0; index < cues.length; index++) {
+    const cue = cues[index] as TimedCueLike | null | undefined;
+    if (
+      cue &&
+      typeof cue === 'object' &&
+      isCueTime(cue.startMs) &&
+      cue.startMs >= 0
+    ) {
+      starts.push(cue.startMs);
+    }
+  }
+  starts.sort((a, b) => a - b);
+
+  const repaired = cues.slice();
+  const repairs: CueTimingRepair[] = [];
+  for (let index = 0; index < cues.length; index++) {
+    const cue = cues[index] as TimedCueLike | null | undefined;
+    if (!cue || typeof cue !== 'object') continue;
+    const { startMs, endMs } = cue;
+    if (
+      !isCueTime(startMs) ||
+      !isCueTime(endMs) ||
+      startMs < 0 ||
+      endMs > startMs
+    ) {
+      continue;
+    }
+    const nextStart = nextStartAfter(starts, startMs);
+    let repairedEndMs = startMs + REPAIRED_CUE_DURATION_MS;
+    if (nextStart !== undefined) {
+      repairedEndMs =
+        nextStart - REPAIRED_CUE_GUARD_MS > startMs
+          ? Math.min(repairedEndMs, nextStart - REPAIRED_CUE_GUARD_MS)
+          : nextStart;
+    }
+    if (!Number.isSafeInteger(repairedEndMs)) continue;
+    repairs.push({
+      index,
+      id: String(cue.id || index + 1),
+      startMs,
+      endMs,
+      repairedEndMs,
+    });
+    repaired[index] = { ...cue, endMs: repairedEndMs } as unknown as T;
+  }
+  return { cues: repaired, repairs };
 }
 
 /**

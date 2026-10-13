@@ -22,12 +22,16 @@ import {
   LogQuery,
 } from './logStorage';
 import { getBuildInfo } from './buildInfo';
+import { getCpuFeatureReport } from './crash/cpuFeaturesService';
 import { exportConfig, importConfig } from './configExporter';
 import { rebuildAppMenu } from './menu';
 import { shutdownPythonRuntime } from './pythonRuntime';
 import { applyProxyFromSettings } from './network/proxyManager';
 import { syncTaskPowerSaveBlocker } from './powerSaveManager';
-import { omitTaskManuscript } from '../../types/taskConfig';
+import {
+  omitTaskManuscript,
+  toRememberedTaskDefaults,
+} from '../../types/taskConfig';
 import {
   isFactoryDefaultGgmlPath,
   resolveModelRoot,
@@ -44,6 +48,24 @@ import { assertProviderList } from '../../types/providerPersistence';
 import { saveProviderList } from './providerPersistence';
 
 console.log(app.getVersion(), 'version');
+
+/**
+ * 把 CPU 指令集探测结果写进日志：用户提 issue 时附上的日志里就带着证据。
+ * 推迟几秒再做，避开启动最忙的时候；Windows 上首次探测要起一次 PowerShell。
+ */
+const CPU_FEATURES_LOG_DELAY_MS = 5000;
+
+function logCpuFeaturesLater(): void {
+  setTimeout(() => {
+    getCpuFeatureReport()
+      .then((report) => {
+        logMessage(`cpuFeatures: ${JSON.stringify(report)}`, 'info');
+      })
+      .catch(() => {
+        // 探测失败不影响任何功能
+      });
+  }, CPU_FEATURES_LOG_DELAY_MS).unref();
+}
 
 export function setupStoreHandlers() {
   // gpuMode 一次性迁移：
@@ -95,9 +117,12 @@ export function setupStoreHandlers() {
         totalmem: os.totalmem(),
         freemem: os.freemem(),
         type: os.type(),
+        // x64 版本在 ARM 设备上经转译运行（Rosetta、Windows 的 x64 模拟）
+        translated: app.runningUnderARM64Translation === true,
         buildInfo: getBuildInfo(),
       };
       logMessage(`osInfo: ${JSON.stringify(osInfo, null, 2)}`, 'info');
+      logCpuFeaturesLater();
       logMessage('Translation providers initialized', 'info');
     })
     .catch(() => {
@@ -235,6 +260,13 @@ export function setupStoreHandlers() {
   // 用户配置相关处理
   ipcMain.on('setUserConfig', async (_event, config) => {
     store.set('userConfig', omitTaskManuscript(config));
+  });
+
+  // 任务页启动任务并被确认后，把该任务的可复用配置记为新任务默认值（"上次使用"）。
+  // 这是唯一的隐式写入点：草稿编辑、读取失败、向导与重试都不会改动默认值。
+  ipcMain.handle('rememberTaskDefaults', async (_event, config) => {
+    store.set('userConfig', toRememberedTaskDefaults(config));
+    return { success: true };
   });
 
   ipcMain.handle('getUserConfig', async () => {

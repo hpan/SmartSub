@@ -44,7 +44,12 @@ import {
   buildWindowText,
   parseBrSegments,
 } from './protocol';
-import { validateSegmentation } from './validator';
+import {
+  compareValidations,
+  formatSimilarity,
+  validateSegmentation,
+  type SegmentationValidation,
+} from './validator';
 import { alignSegmentsToCues, alignSegmentsToWords } from './alignment';
 import { splitCuesIntoWindows, splitWordsIntoWindows } from './windowing';
 import { applySegmentationGuards } from './guards';
@@ -56,6 +61,28 @@ import {
 
 /** 校验失败的反馈重试轮数上限（不含首轮，spec: ≤2）。 */
 const MAX_FEEDBACK_ROUNDS = 2;
+
+/**
+ * 单次请求的超时上限（毫秒）。OpenAI SDK 默认每次尝试等 10 分钟并把超时再重发
+ * 两次，一个卡住的窗口会被占住 30 分钟（#507 日志里的两个窗口）。健康请求通常
+ * 一两分钟内完成；300 秒与 Ollama 的上限一致，给慢速本地模型留足余量。
+ */
+const REQUEST_TIMEOUT_MS = 300_000;
+/**
+ * 手里已有可用答案时，重试只是为了把超长段再切好一点，不值得久等：超时取
+ * 「此前最慢请求的 2 倍」，但不低于该下限，也不超过 REQUEST_TIMEOUT_MS。
+ */
+const MIN_IMPROVEMENT_TIMEOUT_MS = 60_000;
+
+/** 一轮请求的产物：模型原文与校验结果（对齐用的分段在 validation.alignSegments）。 */
+interface SegmentationAttempt {
+  response: string;
+  validation: SegmentationValidation;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export interface AiSegmentationParams {
   onActivity?: ActivityObserver;
@@ -188,15 +215,37 @@ export async function runAiSegmentation(
         : buildCueWindowText(cues, range);
     if (!text.trim()) return [];
 
-    let lastResponse = '';
-    let lastSegments: string[] = [];
-    let lastValidation: ReturnType<typeof validateSegmentation> | null = null;
+    const label = `AI segmentation window ${index + 1}/${totalWindows}`;
+    const totalRounds = MAX_FEEDBACK_ROUNDS + 1;
+    /**
+     * 迄今最好的一次尝试（比较规则见 compareValidations）。重试轮的输出可能比
+     * 首轮更差（改坏文本、截断、请求失败），所以保留「最好的」而不是「最后的」，
+     * 一次退步不会把已有的可用答案扔掉（#507）。
+     */
+    let best: SegmentationAttempt | null = null;
+    const seenResponses = new Set<string>();
+    let rounds = 0;
+    let slowestRequestMs = 0;
     let userPrompt = buildSegmentationUserPrompt(text);
 
-    for (let round = 0; round <= MAX_FEEDBACK_ROUNDS; round += 1) {
+    for (let round = 0; round < totalRounds; round += 1) {
       throwIfSignalCancelled(signal);
+      // 手里已有可用答案时本轮只是锦上添花：限时更紧，且不做传输层重发（失败
+      // 就沿用已有答案）。首轮与抢救受损文本的重试用宽松限时，瞬时错误
+      // （429/5xx）仍享有 SDK 的退避重发。
+      const improving = best?.validation.contentOk === true;
+      const requestLimits = improving
+        ? {
+            timeoutMs: Math.min(
+              REQUEST_TIMEOUT_MS,
+              Math.max(MIN_IMPROVEMENT_TIMEOUT_MS, 2 * slowestRequestMs),
+            ),
+            maxRetries: 0,
+          }
+        : { timeoutMs: REQUEST_TIMEOUT_MS };
+      const requestStartedAt = Date.now();
       unitState(index, round ? 'retrying' : 'requesting', {
-        requestStartedAt: Date.now(),
+        requestStartedAt,
         ...(round
           ? {
               retry: round,
@@ -205,44 +254,108 @@ export async function runAiSegmentation(
             }
           : {}),
       });
-      const responseOrigin = await translator(
-        userPrompt,
-        segProvider,
-        sourceLanguage,
-        targetLanguage,
-        { signal },
-      );
+      let response: string;
+      try {
+        const responseOrigin = await translator(
+          userPrompt,
+          segProvider,
+          sourceLanguage,
+          targetLanguage,
+          { signal, ...requestLimits },
+        );
+        response = Array.isArray(responseOrigin)
+          ? responseOrigin.join('\n')
+          : String(responseOrigin ?? '');
+        slowestRequestMs = Math.max(
+          slowestRequestMs,
+          Date.now() - requestStartedAt,
+        );
+      } catch (error) {
+        // 重试轮的请求失败（超时 / 网络抖动）且已有可用答案：沿用它，不让一次
+        // 失败的重试把整窗扔掉，也不计入「服务不可达」。首轮失败、取消与配置
+        // 错误照旧上抛，由调用处按原规则处理。
+        const canKeepEarlierAnswer =
+          round > 0 &&
+          best?.validation.contentOk === true &&
+          !signal?.aborted &&
+          !isTaskCancelledError(error) &&
+          !isConfigurationError(error);
+        if (!canKeepEarlierAnswer) throw error;
+        logMessage(
+          `${label} retry request failed (round ${round + 1}/${totalRounds}), keeping the best earlier answer: ${describeError(error)}`,
+          'warning',
+        );
+        break;
+      }
       throwIfSignalCancelled(signal);
-      lastResponse = Array.isArray(responseOrigin)
-        ? responseOrigin.join('\n')
-        : String(responseOrigin ?? '');
+      rounds = round + 1;
       unitState(index, 'validating');
-      lastSegments = parseBrSegments(lastResponse);
-      lastValidation = validateSegmentation(text, lastSegments, limits);
-      if (lastValidation.ok) break;
+      const segments = parseBrSegments(response);
+      const validation = validateSegmentation(text, segments, limits);
+      if (!best || compareValidations(validation, best.validation) > 0) {
+        best = { response, validation };
+      }
+      if (validation.ok) break;
       logMessage(
-        `AI segmentation window ${index + 1}/${totalWindows} validation failed (round ${round + 1}/${MAX_FEEDBACK_ROUNDS + 1}, similarity ${(lastValidation.similarity * 100).toFixed(1)}%, lengthViolations ${lastValidation.lengthViolations.length})`,
+        `${label} validation failed (round ${round + 1}/${totalRounds}, contentOk=${validation.contentOk}, similarity ${formatSimilarity(validation)}, lengthViolations ${validation.lengthViolations.length})`,
         'warning',
       );
-      if (round < MAX_FEEDBACK_ROUNDS) {
+      // 模型把同一个答案原样重复：重试没有改变任何东西（确定性后端），省掉后续请求。
+      const fingerprint = response.trim();
+      if (seenResponses.has(fingerprint)) {
+        logMessage(`${label} repeated an earlier answer, no further retries`);
+        break;
+      }
+      seenResponses.add(fingerprint);
+      if (round + 1 < totalRounds) {
+        // 反馈基于最好的一次而不是最新一次：最新一次可能是退步的垃圾输出。
         userPrompt = buildSegmentationFeedbackPrompt(
           text,
-          lastResponse,
-          lastValidation.feedback,
+          best.response,
+          best.validation.feedback,
         );
       }
     }
 
     // 重试耗尽：内容仍被改写 → 降级该窗；仅限长超标（contentOk）→ 接受，
     // 交物理护栏在真实词时间上二次切分（design D8「宽进严出」）。
-    if (!lastValidation || !lastValidation.contentOk) return null;
+    if (!best || !best.validation.contentOk) {
+      const detail = best?.validation.feedback.split('\n')[0] ?? 'no answer';
+      logMessage(
+        `${label} degraded to rule cues: content differs from the original after ${rounds} round(s). ${detail}`,
+        'warning',
+      );
+      return null;
+    }
+    if (best.validation.tolerated) {
+      logMessage(
+        `${label} copy drifted from the transcript (similarity ${(best.validation.similarity * 100).toFixed(1)}%, within tolerance); breaks were re-anchored to the original text`,
+      );
+    }
+    if (!best.validation.ok) {
+      logMessage(
+        `${label} accepted with ${best.validation.lengthViolations.length} over-long segment(s) after ${rounds} round(s); the length guard will re-split them`,
+      );
+    }
 
     unitState(index, 'aligning');
+    // 对齐用校验器给出的分段：严格等值时是模型分段，容差内偏差时是按断点
+    // 切开的原文，所以字幕文字始终来自转写本身。
+    const alignSegments = best.validation.alignSegments;
+    let aligned: AlignedCue[] | null;
     if (tier === 'word') {
-      return alignSegmentsToWords(windowWords!, lastSegments);
+      aligned = alignSegmentsToWords(windowWords!, alignSegments);
+    } else {
+      const alignedCues = alignSegmentsToCues(cues, alignSegments, range);
+      aligned = alignedCues ? alignedCues.map((cue) => ({ cue })) : null;
     }
-    const alignedCues = alignSegmentsToCues(cues, lastSegments, range);
-    return alignedCues ? alignedCues.map((cue) => ({ cue })) : null;
+    if (!aligned) {
+      logMessage(
+        `${label} degraded to rule cues: the answer could not be aligned to the window`,
+        'warning',
+      );
+    }
+    return aligned;
   };
 
   /** 单窗降级兜底：词级按该窗词索引跑规则成句（与成功窗同轴，无 mid-point 混拼）；段级按 cue 切片。 */
@@ -312,9 +425,7 @@ export async function runAiSegmentation(
         degradedWindows += 1;
         results[index] = fallbackForWindow(index);
         logMessage(
-          `AI segmentation window ${index + 1}/${totalWindows} request failed, degraded to rule cues: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `AI segmentation window ${index + 1}/${totalWindows} request failed, degraded to rule cues: ${describeError(error)}`,
           'warning',
         );
       }

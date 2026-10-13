@@ -3,6 +3,7 @@ import fs from 'fs';
 import type { EngineStatus } from '../../../types/engine';
 import { getPath, loadWhisperAddon } from '../whisper';
 import { logMessage, store } from '../storeManager';
+import { withCrashContext } from '../crash/crashContext';
 import { formatSrtContent } from '../fileUtils';
 import {
   trimSubtitleTrailingSilence,
@@ -35,6 +36,7 @@ import {
   getVadSettings,
   isReduceRepetitionEnabled,
   getNumericSetting,
+  shouldUseFlashAttn,
 } from './transcribeShared';
 import { resolveEffectiveSettings } from './outcomePresets';
 import {
@@ -153,7 +155,7 @@ async function transcribeBuiltin(ctx: TranscribeContext): Promise<string> {
       model: modelPath,
       fname_inp: tempAudioFile,
       use_gpu: backend !== 'cpu',
-      flash_attn: false,
+      flash_attn: shouldUseFlashAttn(backend),
       no_prints: false,
       comma_in_time: false,
       translate: false,
@@ -241,7 +243,15 @@ async function transcribeBuiltin(ctx: TranscribeContext): Promise<string> {
         startWatchdog();
         let chunkResult;
         try {
-          chunkResult = await whisperAsync(chunkParams);
+          chunkResult = await withCrashContext(
+            {
+              engine: 'whisper-builtin',
+              backend: whisperBackend,
+              model: whisperModel,
+              phase: 'transcribe-chunk',
+            },
+            () => whisperAsync(chunkParams),
+          );
         } finally {
           clearWatchdog();
         }
@@ -281,7 +291,15 @@ async function transcribeBuiltin(ctx: TranscribeContext): Promise<string> {
     } else {
       startWatchdog();
       try {
-        result = await whisperAsync(whisperParams);
+        result = await withCrashContext(
+          {
+            engine: 'whisper-builtin',
+            backend: whisperBackend,
+            model: whisperModel,
+            phase: 'transcribe',
+          },
+          () => whisperAsync(whisperParams),
+        );
       } finally {
         clearWatchdog();
       }
