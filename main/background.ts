@@ -78,6 +78,7 @@ import { maybeAutoCheckPyEngineUpdate } from './helpers/pythonRuntime/autoUpdate
 import { cleanupLegacyPyEngine } from './helpers/pythonRuntime/legacyCleanup';
 import { applyProxyFromSettings } from './helpers/network/proxyManager';
 import { setupNetworkHandlers } from './helpers/ipcNetworkHandlers';
+import { setupEmbeddedSubtitleHandlers } from './helpers/ipcEmbeddedSubtitleHandlers';
 import {
   applyMacAppBranding,
   resolveAppIcon,
@@ -359,6 +360,7 @@ app.on('before-quit', (event) => {
   setupIpcHandlers(mainWindow);
   setupNetworkHandlers();
   setupTaskProcessor(mainWindow);
+  setupEmbeddedSubtitleHandlers();
   setupSystemInfoManager(mainWindow);
   initializeWorkItemStore();
   setupWorkItemHandlers();

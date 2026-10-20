@@ -173,6 +173,12 @@ export type StoreType = {
     closeHintShown?: boolean;
     /** 云端听写「上传第三方」隐私确认：用户勾「不再提醒」后置 true，跳过后续开跑确认。 */
     cloudUploadConsent?: boolean;
+    /**
+     * 开始任务前的内封字幕确认：用户勾「记住我的选择，不再提示」后置 false，也可在
+     * 「高级选项」里勾回「开始前提示我选择」；缺省 / true = 视频带内封字幕时开始前询问
+     * （新用户的默认：出厂不写这个键）。
+     */
+    embeddedSubtitlePrompt?: boolean;
   };
   providerVersion?: number;
   lastAddonLoadResult?: AddonLoadResultInfo;

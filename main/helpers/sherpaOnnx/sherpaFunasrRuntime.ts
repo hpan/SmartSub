@@ -1,8 +1,18 @@
 import type { ActivityObserver } from '../../../types/taskActivity';
 import path from 'path';
-import { logMessage } from '../storeManager';
+import { app } from 'electron';
+import { logMessage, store } from '../storeManager';
 import { getExtraResourcesPath } from '../utils';
 import { getSherpaLibDir, isSherpaLibInstalled } from './sherpaLibPaths';
+import { ensureNativeSafeModelPath } from './nativeSafePath';
+import {
+  NATIVE_STDERR_DRAIN_MS,
+  NativeStderrWatch,
+  collectNativePaths,
+  describeNullVad,
+  withNonAsciiPathHint,
+  type FailureLanguage,
+} from './nativeFailure';
 import { spawnAppUtilityHost } from '../crash/appUtilityHost';
 import { beginCrashContext } from '../crash/crashContext';
 import {
@@ -82,6 +92,47 @@ function workerPath(): string {
 }
 
 /**
+ * 随包的小模型（silero VAD / gtcrn 降噪）交给原生库前的路径处理：
+ * Windows 上路径含非 ASCII（用户名是中文时默认安装目录就是）时，原生库打不开它，
+ * VAD 会静默得到 `vad is nullptr`。此时换成纯 ASCII 目录里的副本（详见 nativeSafePath.ts）。
+ */
+function nativeSafeModelPath(modelPath: string): string {
+  let userDataDir: string | undefined;
+  try {
+    userDataDir = app.getPath('userData');
+  } catch {
+    userDataDir = undefined;
+  }
+  return ensureNativeSafeModelPath(modelPath, {
+    userDataDir,
+    log: logMessage,
+  });
+}
+
+function failureLanguage(): FailureLanguage {
+  try {
+    return store.get('settings')?.language === 'zh' ? 'zh' : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+interface PendingRequest {
+  resolve: (s: TranscriptionResult) => void;
+  reject: (e: Error) => void;
+  onProgress?: (p: number) => void;
+  onActivity?: ActivityObserver;
+  /** 交给原生库的模型路径（VAD 为暂存后的实际路径）：失败时判断是否要提示非 ASCII 路径 */
+  nativePaths: string[];
+  /**
+   * 依赖 VAD 的请求：请求发出时承载它的 worker 及其 stderr 观察者，加上当时 `vad is nullptr`
+   * 的累计行数。请求以零结果结束且这个数增长了，说明 VAD 创建失败后在空转（见 nativeFailure.ts）。
+   * 观察者随 worker 走，worker 重建不会串到别的请求上。
+   */
+  vad?: { host: UtilityHost; watch: NativeStderrWatch; mark: number };
+}
+
+/**
  * 主侧 sherpa funasr 运行时：常驻一个 worker **进程**（Electron utilityProcess；
  * worker 内 dlopen 原生库、缓存识别器），提供 prewarm / transcribe / cancel /
  * dispose。模型加载与解码均在独立进程，不阻塞主/UI 线程——根治 Windows 首个
@@ -91,15 +142,9 @@ function workerPath(): string {
 class SherpaFunasrRuntime {
   private worker: UtilityHost | null = null;
   private seq = 0;
-  private pending = new Map<
-    string,
-    {
-      resolve: (s: TranscriptionResult) => void;
-      reject: (e: Error) => void;
-      onProgress?: (p: number) => void;
-      onActivity?: ActivityObserver;
-    }
-  >();
+  private pending = new Map<string, PendingRequest>();
+  /** 当前 worker 的 stderr 观察者（每个 worker 一个，随 worker 重建） */
+  private stderrWatch = new NativeStderrWatch();
 
   private ensureWorker(): UtilityHost {
     if (this.worker) return this.worker;
@@ -107,12 +152,16 @@ class SherpaFunasrRuntime {
       throw new Error('sherpa native lib not installed');
     }
     // fork / stderr 日志 / 退出分类 / Linux core 限制由共用底座处理（crash/utilityHost.ts）
+    const watch = new NativeStderrWatch();
     const w = spawnAppUtilityHost({
       workerFile: workerPath(),
       serviceName: 'smartsub-asr-worker',
       logLabel: 'asr worker',
       env: buildSherpaWorkerEnv(getSherpaLibDir()),
+      // 原生库的失败原因只写在 stderr（VAD 甚至不抛错），靠它把静默失败变成明确的错误
+      onStderrLine: (line) => watch.push(line),
     });
+    this.stderrWatch = watch;
     w.onMessage((msg: any) => this.onMessage(msg));
     w.onExit((info) => {
       // dispose() 先置 this.worker=null 再 kill：此时的非零退出码是信号终止的
@@ -149,13 +198,67 @@ class SherpaFunasrRuntime {
       entry.onProgress?.(msg.percent);
     } else if (msg.type === 'done') {
       this.pending.delete(msg.id);
-      entry.resolve({ segments: msg.segments, vadSegments: msg.vadSegments });
+      const result = { segments: msg.segments, vadSegments: msg.vadSegments };
+      if (entry.vad && !result.segments?.length) {
+        this.settleEmptyResult(entry, entry.vad, result);
+      } else {
+        entry.resolve(result);
+      }
     } else if (msg.type === 'error') {
       this.pending.delete(msg.id);
-      const err = new Error(msg.message) as Error & { code?: string };
+      const err = new Error(
+        withNonAsciiPathHint(msg.message, entry.nativePaths, {
+          language: failureLanguage(),
+        }),
+      ) as Error & { code?: string };
       if (msg.code) err.code = msg.code;
       entry.reject(err);
     }
+  }
+
+  /**
+   * 零结果可能是真的没有语音，也可能是 VAD 创建失败后的静默空转（构造函数不抛错，之后每次使用
+   * 打印 `vad is nullptr`）。后者要变成带原因的错误，否则用户只看到"没有字幕 / 没有采样"。
+   * stderr 与结果消息的到达顺序没有保证，所以先等 stderr 排空再判断。
+   */
+  private settleEmptyResult(
+    entry: PendingRequest,
+    vad: NonNullable<PendingRequest['vad']>,
+    result: TranscriptionResult,
+  ): void {
+    setTimeout(() => {
+      const nullAccesses = vad.watch.nullVadCount - vad.mark;
+      if (nullAccesses <= 0) {
+        entry.resolve(result);
+        return;
+      }
+      const reasons = vad.watch.nullVadReasons;
+      logMessage(
+        `sherpa VAD is unusable (${nullAccesses} accesses to a null VAD): ${reasons.join(' | ') || 'no reason captured on stderr'}`,
+        'error',
+      );
+      entry.reject(
+        new Error(
+          describeNullVad({
+            reasons,
+            paths: entry.nativePaths,
+            language: failureLanguage(),
+          }),
+        ),
+      );
+      // worker 里缓存的 VAD 是空句柄，继续复用只会反复静默失败：释放它，下次请求重建。
+      // 只释放产生这个结果的那个 worker，不误杀等待期间已经重建的新 worker。
+      if (this.worker === vad.host) this.dispose();
+    }, NATIVE_STDERR_DRAIN_MS);
+  }
+
+  /** 为一个依赖 VAD 的请求记下基线：承载它的 worker、其 stderr 观察者与当前的空 VAD 计数。 */
+  private watchVad(host: UtilityHost): NonNullable<PendingRequest['vad']> {
+    return {
+      host,
+      watch: this.stderrWatch,
+      mark: this.stderrWatch.nullVadCount,
+    };
   }
 
   private failAll(e: Error): void {
@@ -166,7 +269,11 @@ class SherpaFunasrRuntime {
   /** 预热：仅 load 模型，不转写。失败非致命。 */
   prewarm(model: SherpaModelRequest): void {
     try {
-      this.ensureWorker().postMessage({ type: 'load', ...model });
+      this.ensureWorker().postMessage({
+        type: 'load',
+        ...model,
+        vadModel: nativeSafeModelPath(model.vadModel),
+      });
     } catch (e) {
       logMessage(`sherpa prewarm skipped: ${e}`, 'warning');
     }
@@ -179,9 +286,26 @@ class SherpaFunasrRuntime {
     onActivity?: ActivityObserver,
   ): { id: string; result: Promise<TranscriptionResult> } {
     const w = this.ensureWorker();
+    // 先处理路径再登记请求：这里抛错不会留下永远不结束的 pending 项
+    const vadModel = nativeSafeModelPath(model.vadModel);
     const id = `t${++this.seq}`;
+    const nativePaths = collectNativePaths(
+      model.asrModel,
+      model.tokens,
+      model.qwen,
+      model.fireRed,
+      model.transducer,
+      vadModel,
+    );
     const result = new Promise<TranscriptionResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, onProgress, onActivity });
+      this.pending.set(id, {
+        resolve,
+        reject,
+        onProgress,
+        onActivity,
+        nativePaths,
+        vad: this.watchVad(w),
+      });
     });
     // 崩溃现场：请求结束时移除（then 的两个分支都接住，不派生无人处理的 rejection）
     const endContext = beginCrashContext({
@@ -190,7 +314,13 @@ class SherpaFunasrRuntime {
       phase: 'transcribe',
     });
     result.then(endContext, endContext);
-    w.postMessage({ type: 'transcribe', id, audioFile, ...model });
+    w.postMessage({
+      type: 'transcribe',
+      id,
+      audioFile,
+      ...model,
+      vadModel,
+    });
     return { id, result };
   }
 
@@ -207,11 +337,17 @@ class SherpaFunasrRuntime {
     result: Promise<{ segments: Array<{ start: number; end: number }> }>;
   } {
     const w = this.ensureWorker();
+    const nativeVadModel = nativeSafeModelPath(vadModel);
     const id = `v${++this.seq}`;
     const result = new Promise<{
       segments: Array<{ start: number; end: number }>;
     }>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, {
+        resolve,
+        reject,
+        nativePaths: [nativeVadModel],
+        vad: this.watchVad(w),
+      });
     });
     const endContext = beginCrashContext({
       engine: 'sherpa-asr',
@@ -219,7 +355,13 @@ class SherpaFunasrRuntime {
       phase: 'detect-speech',
     });
     result.then(endContext, endContext);
-    w.postMessage({ type: 'detectSpeech', id, audioFile, vadModel, params });
+    w.postMessage({
+      type: 'detectSpeech',
+      id,
+      audioFile,
+      vadModel: nativeVadModel,
+      params,
+    });
     return { id, result };
   }
 
@@ -233,11 +375,13 @@ class SherpaFunasrRuntime {
     outFile: string,
   ): { id: string; result: Promise<void> } {
     const w = this.ensureWorker();
+    const nativeDenoiseModel = nativeSafeModelPath(denoiseModel);
     const id = `d${++this.seq}`;
     const result = new Promise<void>((resolve, reject) => {
       this.pending.set(id, {
         resolve: () => resolve(),
         reject,
+        nativePaths: [nativeDenoiseModel],
       });
     });
     const endContext = beginCrashContext({
@@ -246,7 +390,13 @@ class SherpaFunasrRuntime {
       phase: 'denoise',
     });
     result.then(endContext, endContext);
-    w.postMessage({ type: 'denoise', id, audioFile, denoiseModel, outFile });
+    w.postMessage({
+      type: 'denoise',
+      id,
+      audioFile,
+      denoiseModel: nativeDenoiseModel,
+      outFile,
+    });
     return { id, result };
   }
 

@@ -5,6 +5,7 @@ import {
   Captions,
   CheckCircle2,
   ChevronRight,
+  Circle,
   CircleAlert,
   Diamond,
   Edit2,
@@ -49,6 +50,8 @@ import {
   type StageDef,
 } from './stageUtils';
 import { formatTaskMessage } from './taskMessages';
+import { ROW_TONE_BAR, ROW_TONE_BORDER, getRowTone } from './rowTone';
+import { TaskFileName } from './TaskFileName';
 import { ManuscriptRowBadge } from './ManuscriptRowBadge';
 import { SpeechReviewBadge } from './SpeechReviewBadge';
 
@@ -93,6 +96,8 @@ export function RailChips({
             <React.Fragment key={item.gate.key}>
               {index > 0 && <ChevronRight className="h-3 w-3 text-faint" />}
               <span
+                data-testid="rail-chip"
+                data-status={status}
                 className={cn(
                   'inline-flex items-center gap-1 text-xs whitespace-nowrap',
                   status === 'pending' && 'text-faint',
@@ -173,6 +178,8 @@ export function RailChips({
           <React.Fragment key={stage.key}>
             {index > 0 && <ChevronRight className="h-3 w-3 text-faint" />}
             <span
+              data-testid="rail-chip"
+              data-status={status}
               className={cn(
                 'inline-flex items-center gap-1 text-xs whitespace-nowrap',
                 status === 'pending' && 'text-faint',
@@ -189,6 +196,8 @@ export function RailChips({
                     : summarizeTitle || manuscriptTitle
               }
             >
+              {/* 每种状态都占同样大小的图标位：阶段推进时标签不会左右跳动 */}
+              {status === 'pending' && <Circle className="h-3 w-3" />}
               {status === 'loading' && (
                 <Loader2 className="h-3 w-3 animate-spin" />
               )}
@@ -389,7 +398,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div data-testid="task-list" className="space-y-2">
       {files.map((file) => {
         const stages = getFileStages(file, typeDef, formData);
         const rail = getFileRail(file, typeDef, formData);
@@ -434,6 +443,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
         ]
           .filter(Boolean)
           .join(' · ');
+        const tone = getRowTone(status.state, failed, Boolean(displayWarning));
         const started = stages.some(
           (s) => getStageStatus(file, s.key) !== 'pending',
         );
@@ -459,10 +469,12 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
         return (
           <div
             key={file?.uuid}
+            data-testid="task-row"
+            data-tone={tone}
+            data-state={status.state}
             className={cn(
-              'group rounded-lg border border-transparent bg-card px-3 py-2.5 transition-colors hover:bg-muted/40',
-              failed && 'border-destructive/30',
-              !failed && displayWarning && 'border-warning/30',
+              'group rounded-lg border bg-card px-3 py-2.5 transition-colors hover:bg-muted/40',
+              ROW_TONE_BORDER[tone],
             )}
           >
             <div className="flex items-center gap-3">
@@ -476,19 +488,7 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="cursor-default truncate text-sm font-medium min-w-0">
-                        {file?.fileName}
-                        {file?.fileExtension}
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-md">
-                      <p className="break-all">{file?.filePath}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <TaskFileName file={file} className="text-sm font-medium" />
                 {file?.embeddedSubtitle && (
                   <TooltipProvider>
                     <Tooltip>
@@ -522,18 +522,25 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
               <RailChips file={file} rail={rail} t={t} />
 
               <div className="flex items-center gap-2 w-[160px] flex-shrink-0">
-                <Progress value={percent} className="h-1.5" />
+                <Progress
+                  value={percent}
+                  className="h-1.5"
+                  indicatorClassName={ROW_TONE_BAR[tone]}
+                />
                 <span className="text-[11px] tabular-nums text-muted-foreground w-[34px] text-right">
                   {started ? `${percent}%` : '--'}
                 </span>
               </div>
-              {etaMinutes != null && (
-                <span className="text-[11px] text-muted-foreground whitespace-nowrap flex-shrink-0">
-                  {etaMinutes < 1
+              {/* 固定宽度槽位：某行开始计时不会把它的进度条推向别的行 */}
+              <span
+                data-testid="task-eta"
+                className="w-16 shrink-0 whitespace-nowrap text-right text-[11px] text-muted-foreground"
+              >
+                {etaMinutes != null &&
+                  (etaMinutes < 1
                     ? t('meta.etaLessMin')
-                    : t('meta.etaMin', { min: Math.ceil(etaMinutes) })}
-                </span>
-              )}
+                    : t('meta.etaMin', { min: Math.ceil(etaMinutes) }))}
+              </span>
 
               <div className="flex items-center gap-1 flex-shrink-0">
                 {/* 停靠在检查点：校对/检查配音 + 放行 */}
@@ -604,27 +611,30 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
                     {t('row.retry')}
                   </Button>
                 )}
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="inline-flex">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          aria-label={t('row.proofread')}
-                          disabled={proofreadDisabled}
-                          onClick={() => onProofread(file)}
-                        >
-                          <Edit2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-[280px]">
-                      {proofreadTooltip}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                {/* 字幕检查点的「校对」按钮就是同一个动作，不再并排放第二个铅笔图标 */}
+                {dockedGate?.key !== 'subtitleGate' && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            aria-label={t('row.proofread')}
+                            disabled={proofreadDisabled}
+                            onClick={() => onProofread(file)}
+                          >
+                            <Edit2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-[280px]">
+                        {proofreadTooltip}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -645,6 +655,8 @@ const TaskRowList: React.FC<TaskRowListProps> = ({
             </div>
 
             <TaskActivityDetails
+              // 状态文字对齐文件名（跳过 ✕ 按钮占位），箭头对齐右侧操作图标
+              className="pl-5 pr-1.5"
               activity={file.taskActivity}
               state={status.state}
               stage={status.stage}

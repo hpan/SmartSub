@@ -24,6 +24,21 @@ Make every frame speak beautifully
 
 ![SmartSub home screen](./resources/preview/home-en.png)
 
+## Special Sponsor
+
+<a href="https://www.aiyoyoo.com/register?aff=YWL9FL2XFPKM" target="_blank" rel="noopener noreferrer"><img src="./resources/sponsors/crazytoken-en.png" alt="SmartSub × CrazyToken: all models, save up to 99%, from 0.05x, new users get $20 in free trial credits" /></a>
+
+❤️ Thank you to [**CrazyToken**](https://www.aiyoyoo.com/register?aff=YWL9FL2XFPKM) for sponsoring SmartSub!
+
+#### CrazyToken | Multiple models for more natural subtitle translation across languages — rates as low as 0.05x, savings of up to 99%
+
+CrazyToken offers APIs for leading models including Claude, GPT, Gemini, Kimi, GLM, DeepSeek, Qwen, and Grok, supporting subtitle translation, contextual understanding, terminology consistency, proofreading, and polishing. Whether you work with educational videos, interviews and podcasts, or multilingual content, you can choose the model that best fits your language and task.
+
+- 💰 **As low as 0.05× for more affordable subtitle translation**: Model pricing starts at just 5% of official prices, with transparent, token-level billing you can review. Reduce model API costs for translating subtitles for long videos and processing subtitles in batches.
+- ✨ **Native access through official channels**: No watered-down responses, model mixing, or long-context compression. Get model support for understanding surrounding context, maintaining consistent terminology, and refining translations.
+- ⚡ **Stable, fast, high-concurrency access with no rate limits**: Reliable API services for batch subtitle translation and multitasking help reduce waiting time.
+- 🎁 **$20 in free credits for new users**: Register through the [exclusive link](https://www.aiyoyoo.com/register?aff=YWL9FL2XFPKM) to receive **$20 in trial credits**, plus additional bonuses when you top up. **One-on-one remote setup assistance** is also available, with a real person helping you configure your model API.
+
 ## What is SmartSub?
 
 SmartSub is an open-source subtitle and dubbing tool that packs the whole pipeline — **speech-to-text → subtitle translation → proofreading → AI dubbing → burn-in** — into one desktop app, with a built-in online video downloader: paste a YouTube / Bilibili link and the source video is fetched for you. Transcription runs on local models (whisper.cpp, sherpa-onnx and more), so your files never leave your machine. It handles batch jobs, accelerates on NVIDIA / AMD / Intel / Apple Silicon GPUs, and runs on Windows, macOS, and Linux.
@@ -88,7 +103,7 @@ Online video **download** / local media → **transcribe** → **translate** →
 
 ### Subtitle translation
 
-- 20 translation services: built-in free translation (Bing / Google free endpoints with automatic fallback and rate limiting), Baidu, Aliyun, Tencent, iFlytek, Volcano Engine, Doubao, NiuTrans, DeepLX, Azure, Google, plus LLM services such as Ollama (local models), DeepSeek, Gemini, Qwen, SiliconFlow, Azure OpenAI, and [DeerAPI](https://api.deerapi.com/register?aff=QvHM)
+- 20 translation services: built-in free translation (Youdao / Bing / Google free endpoints with automatic fallback and rate limiting), Baidu, Aliyun, Tencent, iFlytek, Volcano Engine, Doubao, NiuTrans, DeepLX, Azure, Google, plus LLM services such as Ollama (local models), DeepSeek, Gemini, Qwen, SiliconFlow, Azure OpenAI, and [DeerAPI](https://api.deerapi.com/register?aff=QvHM)
 - Compatible with any OpenAI-style API — bring your own endpoint
 - Output translation only, or bilingual "original + translation" subtitles
 - Per-service custom request parameters configured right in the UI, with import/export — no code changes
@@ -140,13 +155,13 @@ Beyond conventional UI operations, SmartSub provides a cutting-edge copilot expe
 
 If you're cost-conscious, this route costs nothing and requires no sign-ups:
 
-| Step           | Free option                                                                            | Notes                                     |
-| -------------- | -------------------------------------------------------------------------------------- | ----------------------------------------- |
-| Video download | yt-dlp / lux open-source engines                                                       | Installed in-app with one click, free     |
-| Transcription  | whisper.cpp / faster-whisper / FunASR / Qwen3-ASR / FireRedASR / Parakeet local models | Download a model once, works offline      |
-| Translation    | Built-in free translation (Bing / Google endpoints with fallback), Ollama, DeepLX      | Free translation works with zero setup    |
-| TTS dubbing    | Local Kokoro / VITS / ZipVoice voice cloning; Edge TTS free tier                       | Local synthesis is offline, no usage caps |
-| Burn-in        | Bundled ffmpeg                                                                         | Fully local                               |
+| Step           | Free option                                                                                | Notes                                     |
+| -------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| Video download | yt-dlp / lux open-source engines                                                           | Installed in-app with one click, free     |
+| Transcription  | whisper.cpp / faster-whisper / FunASR / Qwen3-ASR / FireRedASR / Parakeet local models     | Download a model once, works offline      |
+| Translation    | Built-in free translation (Youdao / Bing / Google endpoints with fallback), Ollama, DeepLX | Free translation works with zero setup    |
+| TTS dubbing    | Local Kokoro / VITS / ZipVoice voice cloning; Edge TTS free tier                           | Local synthesis is offline, no usage caps |
+| Burn-in        | Bundled ffmpeg                                                                             | Fully local                               |
 
 Paid cloud services (OpenAI, ElevenLabs, Volcengine, Tencent Cloud, and others) are optional upgrades — use them only if you want them.
 
@@ -176,6 +191,16 @@ brew upgrade --cask smartsub # upgrade
 1. After installing, follow the onboarding guide to download a speech model (no GPU or no model? Configure Cloud ASR instead)
 2. Pick a task from the launchpad, drop in media or subtitle files (or paste a link to download an online video), and set source language, target language, and other options
 3. Start processing — then proofread, dub, or burn in the results
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)
+
+- **Scope**: the Windows installer (`SmartSub_Windows_<version>_x64.exe`). Signing runs automatically in GitHub Actions, and every release needs a manual approval before it is signed. Signing applies from the first release after the certificate was issued; earlier releases are unsigned.
+- **Team roles**:
+  - Authors (may change the source directly) and Reviewers (review pull requests from external contributors): [@buxuku](https://github.com/buxuku)
+  - Approvers (approve every release for signing): [@buxuku](https://github.com/buxuku)
+- **Privacy policy**: SmartSub does not collect or upload any usage data and contains no analytics SDK. On startup it contacts the network automatically only to check for updates, in two places: the app update check (a request to GitHub Releases; turn it off with "Check for updates on startup" in Settings) and, only if the faster-whisper runtime is installed, a once-a-day check for a newer runtime (a request to GitHub; it only notifies you, never downloads anything by itself, and is not controlled by that switch). Downloading models, acceleration packs and video download engines, downloading online videos, and cloud translation, Cloud ASR and cloud dubbing connect to the network only when you use those features, and send content only to the services you choose or configure — each of which applies its own privacy policy. Crash diagnostics and logs stay on your machine and are never uploaded automatically.
 
 ## Going deeper
 

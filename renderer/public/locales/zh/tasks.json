@@ -103,6 +103,7 @@
     "composeEncoder": "编码方式",
     "composeEncoderUnavailable": "（本机不可用）",
     "composeAudioHint": "配音完成后将自动替换视频原声",
+    "composeContentHint": "成片字幕内容跟随「输出内容」设置：{{content}}",
     "composeStyleHint": "样式可在合成工作台微调并保存为「我的样式」，",
     "composeStyleLink": "去调整样式",
     "gatesTitle": "人工把关（可选）",
@@ -133,6 +134,8 @@
     "refineActionAdjust": "调整精修配置",
     "blockSummaryFollow": "摘要跟随的翻译服务不是已配置的 AI，请显式选择一个摘要服务",
     "blockSummaryProviderInvalid": "摘要服务不可用（不存在、非 AI 或未配置），请重新选择",
+    "summaryActionDisable": "关闭摘要",
+    "summaryActionAdjust": "调整摘要",
     "goConfigure": "去配置",
     "readyHint": "就绪：开始后 {{count}} 个文件将按流程自动处理",
     "clearFiles": "清空列表",
@@ -165,7 +168,7 @@
     "toastTraditionalRefineConflict": "已切换为「{{provider}}」。因开启了「{{feature}}」，传统接口无法执行精修，建议在「断句与精修」中单独选择 AI 模型或关闭该功能。",
     "style": "输出内容",
     "format": "字幕格式",
-    "embeddedSubtitles": "优先内封字幕",
+    "embeddedSubtitles": "优先使用内封字幕",
     "glossary": "词库",
     "glossaryAllEnabled": "全局已启用",
     "glossaryNone": "不使用词库",
@@ -176,13 +179,22 @@
     "glossaryGoManage": "去词库",
     "glossaryIntro": "选择本次任务参与匹配的词库。未选择时使用全部已启用词库。",
     "generateSummary": "生成摘要",
+    "summaryIntro": "翻译前先通读整份字幕，生成人物、语气与术语摘要，随每批翻译一起发给 AI，让长视频的称呼与语气前后一致。会多一次 AI 调用。",
+    "summaryStateOff": "关闭",
+    "summaryStateWarning": "待配置",
+    "summaryEnableLabel": "启用生成摘要",
+    "summaryEnableHint": "新任务会沿用这次的选择",
     "summaryProvider": "摘要服务",
     "summaryProviderPlaceholder": "选择 AI 服务",
     "summaryProviderMissing": "还没有已配置的 AI 翻译服务",
+    "summaryGoConfigure": "去配置 AI 服务",
     "summaryFollowHint": "（跟随翻译服务）",
     "summaryFollowLabel": "跟随翻译服务",
     "summarySkipHint": "短字幕（少于 20 条，或全文可在一个批次内译完）会自动跳过摘要。",
-    "summaryNotInjectedHint": "当前翻译服务无法把摘要写入提示词，摘要仅供对照。"
+    "summaryNotInjectedHint": "当前翻译服务不是 AI，读不到摘要，摘要仅供对照，不会改善译文。",
+    "summaryEditPrompt": "自定义摘要提示词",
+    "summaryEditPromptHint": "全局设置，对所有任务生效",
+    "summaryPromptCustomized": "已自定义"
   },
   "manuscript": {
     "label": "参考文稿",
@@ -274,6 +286,11 @@
     "recognition": "转写",
     "output": "输出与保存",
     "execution": "执行"
+  },
+  "embeddedSubtitleSetting": {
+    "description": "视频自带文本字幕轨时直接提取，跳过语音识别；没有字幕轨的视频照常识别。",
+    "promptLabel": "开始前提示我选择",
+    "promptDescription": "检测到视频带内封字幕时，开始前先问一次。"
   },
   "vad": {
     "label": "语音活动检测（VAD）",
@@ -512,6 +529,7 @@
     "grid": "网格视图"
   },
   "listCleared": "已清空文件列表",
+  "rowRemoved": "已移除「{{name}}」",
   "modeSwitch": {
     "confirmTitle": "切换任务模式",
     "incompatibleDesc": "当前列表包含与目标模式不兼容的文件，切换将清空列表。是否继续？",
