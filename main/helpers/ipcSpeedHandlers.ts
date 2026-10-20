@@ -57,6 +57,31 @@ function getMediaInfo(filePath: string): Promise<MediaInfo> {
   });
 }
 
+/**
+ * 根据输出容器的扩展名返回兼容的音频编码器。
+ * 变速必须重新编码，而各容器对编码有硬性要求：
+ * 之前对所有音频强制 -c:a aac，在 wav/flac/mp3/ogg 等容器下会触发
+ * "Conversion failed!"，因此按容器选择编码器。
+ */
+function audioCodecForExt(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case '.mp3':
+      return 'libmp3lame';
+    case '.wav':
+      return 'pcm_s16le';
+    case '.flac':
+      return 'flac';
+    case '.ogg':
+      return 'libvorbis';
+    case '.webm':
+      return 'libopus';
+    case '.m4a':
+    case '.aac':
+    default:
+      return 'aac';
+  }
+}
+
 export function setupSpeedHandlers(mainWindow: BrowserWindow) {
   // 选择文件
   ipcMain.handle('speed:selectFile', async () => {
@@ -159,10 +184,14 @@ export function setupSpeedHandlers(mainWindow: BrowserWindow) {
 
         return new Promise((resolve) => {
           let lastPercent = 0;
+          let stderrLog = '';
           let cmd = ffmpeg(inputPath);
 
           if (isVideo) {
             // 视频：加速音频 + 加速视频
+            // webm 容器不支持 aac，单独处理音频编码
+            const videoAudioCodec =
+              ext.toLowerCase() === '.webm' ? 'libopus' : 'aac';
             cmd = cmd
               .audioFilters(atempoFilters)
               .videoFilters(`setpts=${(1 / speed).toFixed(4)}*PTS`)
@@ -174,21 +203,31 @@ export function setupSpeedHandlers(mainWindow: BrowserWindow) {
                 '-crf',
                 '23',
                 '-c:a',
-                'aac',
+                videoAudioCodec,
                 '-b:a',
                 '128k',
                 '-y',
               );
           } else {
-            // 音频：只加速音频
-            cmd = cmd
-              .audioFilters(atempoFilters)
-              .outputOptions('-c:a', 'aac', '-b:a', '128k', '-y');
+            // 音频：只加速音频，按容器选择兼容的编码
+            const audioCodec = audioCodecForExt(ext);
+            const lossyCodecs = new Set([
+              'aac',
+              'libmp3lame',
+              'libvorbis',
+              'libopus',
+            ]);
+            const audioOpts: string[] = ['-c:a', audioCodec, '-y'];
+            if (lossyCodecs.has(audioCodec)) audioOpts.push('-b:a', '128k');
+            cmd = cmd.audioFilters(atempoFilters).outputOptions(audioOpts);
           }
 
           cmd
             .on('start', (cmdStr: string) => {
               logMessage(`[speed] ffmpeg cmd: ${cmdStr}`, 'info');
+            })
+            .on('stderr', (line: string) => {
+              stderrLog += line + '\n';
             })
             .on(
               'progress',
@@ -206,8 +245,16 @@ export function setupSpeedHandlers(mainWindow: BrowserWindow) {
               resolve({ success: true, outputPath });
             })
             .on('error', (err: Error) => {
-              logMessage(`[speed] error: ${err.message}`, 'error');
-              resolve({ success: false, error: `变速失败: ${err.message}` });
+              // 透出 ffmpeg 真实报错，方便定位（默认只给外壳信息）
+              const detail = stderrLog
+                .split('\n')
+                .map((l) => l.trim())
+                .filter(Boolean)
+                .slice(-3)
+                .join(' | ');
+              const msg = detail ? `${err.message} (${detail})` : err.message;
+              logMessage(`[speed] error: ${msg}`, 'error');
+              resolve({ success: false, error: `变速失败: ${msg}` });
             })
             .save(outputPath);
         });

@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Play,
   Pause,
+  Square,
   Loader2,
   CheckCircle2,
   AlertCircle,
@@ -211,6 +212,20 @@ export default function SpeedPanel() {
     }
   }, [file, isPlaying, speed]);
 
+  // 停止：暂停并回到开头
+  const handleStop = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    setIsPlaying(false);
+    setCurrentTime(0);
+  }, []);
+
   // 空格键控制播放/暂停
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -366,6 +381,15 @@ export default function SpeedPanel() {
               ) : (
                 <Play className="h-4 w-4" />
               )}
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={handleStop}
+              title="停止"
+            >
+              <Square className="h-4 w-4" />
             </Button>
             <div className="flex-1 text-xs text-muted-foreground">
               {formatTime(currentTime)} / {formatTime(duration)}

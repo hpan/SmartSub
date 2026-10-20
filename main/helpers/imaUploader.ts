@@ -110,15 +110,24 @@ function setCachedFolderId(
   saveIMAConfig(config);
 }
 
-/** 根据标题匹配节目映射，返回目标知识库名和文件夹名 */
-function resolveTarget(title: string): {
+/** 根据标题/文件路径匹配节目映射，返回目标知识库名和文件夹名 */
+function resolveTarget(
+  title: string,
+  filePath?: string,
+): {
   knowledgeBase: string;
   folderName: string;
 } {
   const config = loadIMAConfig();
   const mappings = config.programMappings || [];
+
+  // 标题为空时用文件名兜底，确保仍有可匹配的文本
+  const effectiveTitle =
+    (title || '').trim() || (filePath ? path.basename(filePath) : '');
+
+  // 1) 优先按标题匹配
   for (const m of mappings) {
-    if (title.includes(m.keyword)) {
+    if (effectiveTitle.includes(m.keyword)) {
       logMessage(
         `[IMA] 标题匹配: "${m.keyword}" → 知识库 "${m.knowledgeBase}" / 文件夹 "${m.folderName}"`,
         'info',
@@ -126,11 +135,28 @@ function resolveTarget(title: string): {
       return { knowledgeBase: m.knowledgeBase, folderName: m.folderName };
     }
   }
+
+  // 2) 标题未命中时，用文件所在目录名兜底。
+  //    下载时已按节目正确归档到各自目录（如 华创张瑜旬度时间2026），
+  //    目录名自带节目关键词，比标题更可靠，可避免「标题漏带关键词→误进默认大摩」的问题。
+  if (filePath) {
+    const dirName = path.basename(path.dirname(filePath));
+    for (const m of mappings) {
+      if (dirName.includes(m.keyword) || filePath.includes(m.keyword)) {
+        logMessage(
+          `[IMA] 标题未命中，目录兜底匹配: "${m.keyword}" (目录="${dirName}") → 知识库 "${m.knowledgeBase}" / 文件夹 "${m.folderName}"`,
+          'info',
+        );
+        return { knowledgeBase: m.knowledgeBase, folderName: m.folderName };
+      }
+    }
+  }
+
   // 默认: 大摩闭门会 + YYYYMM_updating
   const now = new Date();
   const yyyymm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
   logMessage(
-    `[IMA] 无匹配映射，使用默认: 大摩闭门会 / ${yyyymm}_updating`,
+    `[IMA] 标题/目录均未命中映射 (title="${effectiveTitle.slice(0, 50)}")，使用默认: 大摩闭门会 / ${yyyymm}_updating`,
     'info',
   );
   return { knowledgeBase: '大摩闭门会', folderName: `${yyyymm}_updating` };
@@ -356,7 +382,7 @@ export async function uploadToIMA(
     return { success: false, error: '文件不存在' };
   }
 
-  const target = resolveTarget(title || path.basename(filePath));
+  const target = resolveTarget(title, filePath);
   const kbId = getKnowledgeBaseId(target.knowledgeBase);
   if (!kbId) {
     return {

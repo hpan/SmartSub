@@ -113,7 +113,8 @@ const PROGRAMS: ProgramDef[] = [
   {
     name: '招商宏观周周谈',
     keywords: ['招商'],
-    anyKeywords: ['宏观', '张静静', '周周谈'],
+    // UP主实际栏目名为「招商开门会」，标题未必带 宏观/张静静/周周谈
+    anyKeywords: ['宏观', '张静静', '周周谈', '开门'],
     timeAfter: 10,
     knowledgeBase: '中金闭门会',
     folderName: '招商宏观周周谈2026',
@@ -122,7 +123,8 @@ const PROGRAMS: ProgramDef[] = [
   {
     name: '华创宏观张瑜旬度',
     keywords: ['华创'],
-    anyKeywords: ['宏观', '张瑜', '旬度'],
+    // UP主实际栏目名为「华创开门会」，标题未必带 宏观/张瑜/旬度
+    anyKeywords: ['宏观', '张瑜', '旬度', '开门'],
     timeAfter: 10,
     knowledgeBase: '中金闭门会',
     folderName: '华创宏观-张瑜旬度时间2026',
