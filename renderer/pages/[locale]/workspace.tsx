@@ -14,6 +14,7 @@ import { getStaticPaths, makeStaticProperties } from '../../lib/get-static';
 import PageHeader from '@/components/PageHeader';
 import { cn } from 'lib/utils';
 import { toast } from 'sonner';
+import { useRouter } from 'next/router';
 import {
   Download,
   Scissors,
@@ -620,6 +621,8 @@ function TaskRow({
 
 /* ── 主页面 ── */
 export default function WorkspacePage() {
+  const router = useRouter();
+  const locale = (router.locale as string) || 'zh';
   const [tasks, setTasks] = useState<PipelineTask[]>([]);
   const tasksRef = useRef(tasks);
   useEffect(() => {
@@ -746,6 +749,18 @@ export default function WorkspacePage() {
 
       <div className="min-h-0 flex-1 overflow-auto space-y-5">
         <UpcomingSchedule />
+
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-dashed px-3 py-2">
+          <span className="text-xs text-muted-foreground">
+            B站下载的 Cookie 与「抓取」页共用同一份配置
+          </span>
+          <button
+            onClick={() => router.push(`/${locale}/grab`)}
+            className="text-xs text-primary hover:underline shrink-0"
+          >
+            去抓取页设置 →
+          </button>
+        </div>
 
         <div className="space-y-3">
           <div className="flex items-center justify-between">

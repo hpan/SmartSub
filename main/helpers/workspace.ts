@@ -130,12 +130,13 @@ const PROGRAMS: ProgramDef[] = [
     folderName: '华创宏观-张瑜旬度时间2026',
     targetHour: 21,
   },
-  // 通用兜底：标题含"大摩"+"闭门会"，需中午12点后发布且时长>=30分钟（过滤AI合成短视频）
+  // 通用兜底：标题含"大摩"+"闭门会"，需中午12点后发布且时长>=20分钟（过滤AI合成短视频）
+  // 注：真实节目实测有 27.5 分钟的（261021 期 1648 秒），30 分钟阈值会误杀，放宽到 20 分钟
   {
     name: '大摩闭门会',
     keywords: ['大摩', '闭门会'],
     timeAfter: 12,
-    minDuration: 1800,
+    minDuration: 1200,
     knowledgeBase: '大摩闭门会',
     folderName: '',
     targetHour: 12,
@@ -335,7 +336,7 @@ function getCookieArgs(): string[] {
           return ['--cookies-from-browser', 'edge'];
         case 'from-browser-chrome':
           return ['--cookies-from-browser', 'chrome'];
-        case 'file':
+        case 'from-file':
           return config.cookieFile ? ['--cookies', config.cookieFile] : [];
         default:
           return [];
@@ -661,34 +662,64 @@ function getFfmpegPathLocal(): string {
 /* ── Pipeline 步骤实现 ── */
 
 /** 步骤1：下载音频 */
-async function stepDownload(task: PipelineTask): Promise<string> {
+async function stepDownload(
+  task: PipelineTask,
+  force = false,
+): Promise<string> {
   const outputDir = getProgramDir(task.programName);
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-  // 重跑时如果音频文件已存在，跳过下载
-  if (task.audioPath && fs.existsSync(task.audioPath)) {
-    logMessage(
-      `[pipeline] audio file exists, skipping download: ${task.audioPath}`,
-      'info',
-    );
-    return task.audioPath;
-  }
-
-  // 也检查目录中是否已有同名文件
   const safeName = cleanFileName(task.episodeTitle);
-  const existing = fs
-    .readdirSync(outputDir)
-    .find(
-      (f: string) =>
-        f.startsWith(safeName) && /\.(m4a|mp3|aac|wav|opus)$/i.test(f),
-    );
-  if (existing) {
-    const existingPath = path.join(outputDir, existing);
-    logMessage(
-      `[pipeline] found existing file, skipping download: ${existingPath}`,
-      'info',
-    );
-    return existingPath;
+
+  if (force) {
+    // 强制重新下载（重新执行/重试）：先删除已存在的同名文件，
+    // 否则会被下面的"跳过下载"逻辑命中，直接返回旧的片段（如 17 分钟预览版）。
+    let removed = 0;
+    if (task.audioPath && fs.existsSync(task.audioPath)) {
+      try {
+        fs.unlinkSync(task.audioPath);
+        removed++;
+      } catch {}
+    }
+    for (const f of fs.readdirSync(outputDir)) {
+      if (f.startsWith(safeName) && /\.(m4a|mp3|aac|wav|opus)$/i.test(f)) {
+        try {
+          fs.unlinkSync(path.join(outputDir, f));
+          removed++;
+        } catch {}
+      }
+    }
+    if (removed > 0) {
+      logMessage(
+        `[pipeline] force re-download, removed ${removed} stale file(s)`,
+        'info',
+      );
+    }
+  } else {
+    // 正常/崩溃恢复：音频文件已存在则跳过下载
+    if (task.audioPath && fs.existsSync(task.audioPath)) {
+      logMessage(
+        `[pipeline] audio file exists, skipping download: ${task.audioPath}`,
+        'info',
+      );
+      return task.audioPath;
+    }
+
+    // 也检查目录中是否已有同名文件
+    const existing = fs
+      .readdirSync(outputDir)
+      .find(
+        (f: string) =>
+          f.startsWith(safeName) && /\.(m4a|mp3|aac|wav|opus)$/i.test(f),
+      );
+    if (existing) {
+      const existingPath = path.join(outputDir, existing);
+      logMessage(
+        `[pipeline] found existing file, skipping download: ${existingPath}`,
+        'info',
+      );
+      return existingPath;
+    }
   }
 
   const videoUrl =
@@ -707,6 +738,10 @@ async function stepDownload(task: PipelineTask): Promise<string> {
     '--extract-audio',
     '--audio-format',
     'm4a',
+    // 优先取最佳音轨；付费/充电视频若无独立音轨则回退 best（避免
+    // "format not available" 报错把整期打挂）。与抓取页一致，确保拿到完整版而非预览片段。
+    '-f',
+    'bestaudio/best',
     '--ffmpeg-location',
     ffmpegDir,
     ...cookieArgs,
@@ -1104,7 +1139,10 @@ async function stepCompose(
 }
 
 /* ── Pipeline 执行 ── */
-async function executePipeline(task: PipelineTask): Promise<void> {
+async function executePipeline(
+  task: PipelineTask,
+  forceDownload = false,
+): Promise<void> {
   const tasks = loadTasks();
   const idx = tasks.findIndex((t) => t.id === task.id);
   if (idx === -1) return;
@@ -1120,7 +1158,7 @@ async function executePipeline(task: PipelineTask): Promise<void> {
 
   const stepHandlers: Record<string, () => Promise<void>> = {
     download: async () => {
-      audioPath = await stepDownload(task);
+      audioPath = await stepDownload(task, forceDownload);
       task.audioPath = audioPath;
       task.stepDetails = task.stepDetails || {};
       task.stepDetails['download'] = `FILE:${audioPath}`;
@@ -1261,7 +1299,7 @@ export function registerWorkspaceHandlers(): void {
     task.pausedAt = undefined;
     task.stepDetails = {};
     saveTasks(tasks);
-    executePipeline(task);
+    executePipeline(task, true);
     return { success: true };
   });
   // 重新执行：重置所有步骤，从头开始
@@ -1280,7 +1318,7 @@ export function registerWorkspaceHandlers(): void {
     task.pausedAt = undefined;
     task.stepDetails = {};
     saveTasks(tasks);
-    executePipeline(task);
+    executePipeline(task, true);
     return { success: true };
   });
   ipcMain.handle('workspace:stop', async (_e, taskId: string) => {
@@ -1350,7 +1388,7 @@ export function registerWorkspaceHandlers(): void {
         } else {
           logMessage(
             `[workspace] confirmRename: no rename needed (same path or file not found)`,
-            'warn',
+            'warning',
           );
         }
         task.audioPath = finalPath;

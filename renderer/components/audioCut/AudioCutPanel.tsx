@@ -523,16 +523,40 @@ export default function AudioCutPanel({
     setDragging(false);
   }, []);
 
-  const handleAddPoint = useCallback(() => {
-    if (playing && audioRef.current) {
-      // 播放中点击添加切割点，直接取当前播放时间
-      const time = audioRef.current.currentTime;
-      setCutPoints((prev) => [...prev, formatSeconds(time)]);
-      toast.info(`已添加切割点 ${formatSeconds(time)}`);
-    } else {
-      setCutPoints((prev) => [...prev, '']);
-    }
-  }, [playing]);
+  // 聚焦指定索引的切割点输入框
+  const focusPointByIndex = useCallback((idx: number) => {
+    setTimeout(() => {
+      const container = document.querySelector('.flex.flex-col.gap-2');
+      if (!container) return;
+      const inputs = container.querySelectorAll('input[type="text"]');
+      const el = inputs[idx] as HTMLInputElement | undefined;
+      if (el) el.focus();
+    }, 50);
+  }, []);
+
+  // 添加切割点：不传参=末尾追加（原行为）；传 index+position=在某点前/后插入
+  const handleAddPoint = useCallback(
+    (index?: number, position: 'before' | 'after' = 'after') => {
+      const time =
+        playing && audioRef.current ? audioRef.current.currentTime : null;
+      const newVal = time !== null ? formatSeconds(time) : '';
+      let insertedIndex: number;
+      if (index === undefined) {
+        insertedIndex = cutPoints.length;
+        setCutPoints((prev) => [...prev, newVal]);
+      } else {
+        insertedIndex = position === 'before' ? index : index + 1;
+        setCutPoints((prev) => {
+          const next = [...prev];
+          next.splice(insertedIndex, 0, newVal);
+          return next;
+        });
+      }
+      if (time !== null) toast.info(`已添加切割点 ${formatSeconds(time)}`);
+      focusPointByIndex(insertedIndex);
+    },
+    [playing, cutPoints.length, focusPointByIndex],
+  );
 
   const handleRemovePoint = useCallback((index: number) => {
     setCutPoints((prev) => prev.filter((_, i) => i !== index));
@@ -1033,19 +1057,8 @@ export default function AudioCutPanel({
                         }, 50);
                       }
                     }}
-                    className="flex-1 h-8 px-3 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                    className="w-40 flex-shrink-0 h-8 px-3 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                   />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 px-2 text-xs"
-                    onClick={() => {
-                      const t = parseTimeInput(cp);
-                      if (t !== null) seekTo(t);
-                    }}
-                  >
-                    跳转
-                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1067,10 +1080,42 @@ export default function AudioCutPanel({
                       <Play className="h-3.5 w-3.5" />
                     )}
                   </Button>
+                  {/* 在某一切割点前/后插入新切割点 */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-primary"
+                    title={`在「切割点 ${i + 1}」前面插入`}
+                    onClick={() => handleAddPoint(i, 'before')}
+                  >
+                    前＋
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-primary"
+                    title={`在「切割点 ${i + 1}」后面插入`}
+                    onClick={() => handleAddPoint(i, 'after')}
+                  >
+                    后＋
+                  </Button>
+                  {/* 弹性空白：播放键紧贴输入框，跳转/删除按钮组靠右 */}
+                  <div className="flex-1" />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => {
+                      const t = parseTimeInput(cp);
+                      if (t !== null) seekTo(t);
+                    }}
+                  >
+                    跳转
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    className="h-7 w-7 ml-6 text-muted-foreground hover:text-destructive"
                     onClick={() => handleRemovePoint(i)}
                   >
                     <Trash2 className="h-3.5 w-3.5" />

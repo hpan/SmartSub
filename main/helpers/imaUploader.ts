@@ -92,6 +92,44 @@ function getKnowledgeBaseId(name: string): string | null {
   return config.knowledgeBases[name] || null;
 }
 
+/** 知识库 ID 合法格式：ima_kb_ + 8 位字母数字（IMA 接口要求） */
+const KB_ID_RE = /^ima_kb_[A-Za-z0-9]{8}$/;
+
+/** 调用 IMA 拉取当前知识库列表（含最新 kb_id，可能因 IMA 升级而轮换） */
+async function searchKnowledgeBases(): Promise<Record<string, string>> {
+  const result = await imaApi('search_knowledge_base', {
+    query: '',
+    cursor: '',
+    limit: 20,
+  });
+  if (result.code !== 0 || !result.data?.info_list) {
+    logMessage(
+      `[IMA] search_knowledge_base failed: ${JSON.stringify(result)}`,
+      'warning',
+    );
+    return {};
+  }
+  const map: Record<string, string> = {};
+  for (const it of result.data.info_list) {
+    if (it.kb_id && it.kb_name) map[it.kb_name] = it.kb_id;
+  }
+  return map;
+}
+
+/** 从 IMA 刷新知识库 ID 并写回本地配置；KB 轮换后旧 folder 缓存一并清空 */
+async function refreshKnowledgeBaseIds(): Promise<void> {
+  const remote = await searchKnowledgeBases();
+  if (Object.keys(remote).length === 0) return;
+  const config = loadIMAConfig();
+  config.knowledgeBases = { ...config.knowledgeBases, ...remote };
+  config.folderCache = {};
+  saveIMAConfig(config);
+  logMessage(
+    `[IMA] 已刷新知识库 ID: ${Object.keys(remote).join(', ')}`,
+    'info',
+  );
+}
+
 /** 从本地缓存读取文件夹 ID */
 function getCachedFolderId(kbName: string, yyyymm: string): string | null {
   const config = loadIMAConfig();
@@ -383,7 +421,16 @@ export async function uploadToIMA(
   }
 
   const target = resolveTarget(title, filePath);
-  const kbId = getKnowledgeBaseId(target.knowledgeBase);
+  let kbId = getKnowledgeBaseId(target.knowledgeBase);
+  // 本地 ID 缺失或格式失效（IMA 可能轮换 kb_id）时，自动从 IMA 刷新
+  if (!kbId || !KB_ID_RE.test(kbId)) {
+    logMessage(
+      `[IMA] 本地知识库 "${target.knowledgeBase}" ID 缺失/失效，尝试从 IMA 刷新...`,
+      'info',
+    );
+    await refreshKnowledgeBaseIds();
+    kbId = getKnowledgeBaseId(target.knowledgeBase);
+  }
   if (!kbId) {
     return {
       success: false,
