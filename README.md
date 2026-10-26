@@ -26,6 +26,8 @@
 
 ## 特别赞助
 
+🤝 想成为赞助商或洽谈合作？请查看 [**赞助合作说明**](https://smartsub.linxiaodong.com/sponsorship)。
+
 <a href="https://www.aiyoyoo.com/register?aff=YWL9FL2XFPKM" target="_blank" rel="noopener noreferrer"><img src="./resources/sponsors/crazytoken-zh.png" alt="SmartSub × CrazyToken：全模型服务，最高省 99%，低至 0.05x，新用户注册即领 $20 体验额度" /></a>
 
 ❤️ 感谢 [**CrazyToken**](https://www.aiyoyoo.com/register?aff=YWL9FL2XFPKM) 对 SmartSub 的赞助支持！
@@ -456,6 +458,7 @@ yarn dev
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — FunASR / Qwen3-ASR / FireRedASR / Parakeet 与本地 TTS 的运行时
 - [FFmpeg](https://ffmpeg.org/) — 音视频处理与字幕烧录
 - [Bob](https://bobtranslate.com/) — 翻译服务申请文档
+- [LINUX DO](https://linux.do) — 新的理想型社区，感谢社区的交流与反馈
 
 ## 许可证
 

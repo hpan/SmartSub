@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { logMessage } from './storeManager';
 import { getMd5, ensureTempDir, timemarkToSeconds } from './fileUtils';
 import { getAudioCacheKey } from './audioCacheKey';
+import { FIRST_AUDIO_STREAM } from './audioStreamSelection';
 import { getTaskContext, TaskCancelledError } from './taskContext';
 import { energySpeechSegments } from './subtitleTiming';
 import { computeChunkBoundaries } from './cloudAudioChunking';
@@ -84,7 +85,7 @@ export const extractAudio = (
         .audioFrequency(16000)
         .audioChannels(1)
         .audioCodec('pcm_s16le')
-        .outputOptions('-y')
+        .outputOptions(['-map', FIRST_AUDIO_STREAM, '-y'])
         .on('start', function (str) {
           onProgress(0);
           logMessage(`extract audio start ${str}`, 'info');
@@ -161,9 +162,11 @@ export async function extractAudioFromVideo(event, file) {
   logMessage(`tempDir: ${tempDir}`, 'info');
   // 缓存键含文件大小与 mtime：同路径换了视频不会再命中旧音频（issue #510）。
   // 读不到文件状态（null）就无法证明缓存仍对应当前文件：不复用，直接重新抽取。
-  const cacheKey = getAudioCacheKey(filePath);
+  const cacheKey = file.taskRunId ? null : getAudioCacheKey(filePath);
   const md5FileName = cacheKey ?? getMd5(filePath);
-  const tempAudioFile = path.join(tempDir, `${md5FileName}.wav`);
+  const tempAudioFile = file.taskRunId
+    ? path.join(file.directory, 'extracted-audio.wav')
+    : path.join(tempDir, `${md5FileName}.wav`);
   file.tempAudioFile = tempAudioFile;
 
   if (cacheKey && fs.existsSync(tempAudioFile)) {

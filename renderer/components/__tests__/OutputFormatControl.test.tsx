@@ -15,12 +15,13 @@ const typeDef = {
   hasTranslate: true,
 } as any;
 
-const renderControl = (formData: Record<string, unknown>) =>
+const renderControl = (formData: Record<string, unknown>, compact = false) =>
   render(
     <OutputFormatControl
       form={{ setValue: jest.fn() }}
       formData={formData}
       typeDef={typeDef}
+      compact={compact}
     />,
   );
 
@@ -43,6 +44,19 @@ describe('the output style summary', () => {
     expect(trigger()).toHaveTextContent(label);
   });
 
+  test.each([
+    ['onlyTranslate', 'outputTranslationOnly', 'outputTranslationOnly'],
+    ['sourceAndTranslate', 'outputBilingual', 'outputSourceFirst'],
+    ['translateAndSource', 'outputBilingual', 'outputTranslationFirst'],
+  ])(
+    'keeps the full %s ordering in the compact summary tooltip',
+    (translateContent, shortLabel, fullLabel) => {
+      renderControl({ translateContent, subtitleOutputFormats: ['srt'] }, true);
+      expect(trigger()).toHaveTextContent(`${shortLabel} · SRT`);
+      expect(trigger()).toHaveAttribute('title', `${fullLabel} · SRT`);
+    },
+  );
+
   // Opening the popover is by far the slowest thing in this file (jsdom selector matching
   // across Radix's portal), so everything that needs it open is asserted in this one test.
   test('explains an unset style with the translation-only layout example', () => {
@@ -51,8 +65,8 @@ describe('the output style summary', () => {
     const example = screen.getByLabelText('outputExample');
     expect(within(example).getByText('outputExampleTarget')).toBeVisible();
     expect(within(example).queryByText('outputExampleSource')).toBeNull();
-    // The embedded subtitles switch moved to Advanced options; this popover is only the
-    // output format and style now.
+    // The embedded subtitles switch lives in More settings; this popover is only the
+    // output format and style.
     expect(screen.getByText('configBar.format')).toBeVisible();
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryByText('configBar.embeddedSubtitles')).toBeNull();
