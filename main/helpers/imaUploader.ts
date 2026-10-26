@@ -213,7 +213,7 @@ async function searchKnowledge(
   if (result.code !== 0) {
     logMessage(
       `[IMA] search_knowledge failed: ${JSON.stringify(result)}`,
-      'warn',
+      'warning',
     );
     return null;
   }
@@ -242,7 +242,10 @@ async function createFolder(
     const found = await searchKnowledge(kbId, folderName);
     if (found) return found;
   }
-  logMessage(`[IMA] create_folder failed: ${JSON.stringify(result)}`, 'warn');
+  logMessage(
+    `[IMA] create_folder failed: ${JSON.stringify(result)}`,
+    'warning',
+  );
   return null;
 }
 
